@@ -1,0 +1,21 @@
+server:
+  service:
+    type: ClusterIP
+  # Optionally, you can add ingress or LoadBalancer here, e.g.:
+  # service:
+  #   type: LoadBalancer
+  #   annotations:
+  #     service.beta.kubernetes.io/aws-load-balancer-internal: "0.0.0.0/0"
+  # (but for now, we’ll stick with ClusterIP)
+
+
+configs:
+  params:
+    create: true
+
+  # This will set the initial admin password to "admin"—you can override below.
+  # secret:
+  #   argocdServerAdminPassword: <bcrypt_hashed_password>
+  # If you want to set a known admin password, generate a bcrypt hash and paste it here.
+  # For simplicity, we’ll let Argo CD auto-generate an initial password 
+  # (check `kubectl -n argocd get secrets argocd-initial-admin-secret -o yaml` to retrieve).

@@ -1,0 +1,44 @@
+adminUser: admin
+adminPassword: "admin"  # change to a strong password
+
+service:
+  type: ClusterIP
+
+ingress:
+  enabled: false
+
+persistence:
+  enabled: false
+
+# If you want to enable persistence:
+# persistence:
+#   enabled: true
+#   size: 10Gi
+#   storageClassName: "gp2"
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+dashboardProviders:
+  dashboardproviders.yaml:
+    apiVersion: 1
+    providers:
+      - name: "default"
+        orgId: 1
+        folder: ""
+        type: file
+        disableDeletion: false
+        editable: true
+        options:
+          path: /var/lib/grafana/dashboards/default
+
+dashboards:
+  default:
+    example-dashboard:
+      # You can embed a default example JSON or leave blank; Grafana’s default home will appear.
+      file: ""
