@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: esg-analyzer
+  labels:
+    app: esg-analyzer
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: esg-analyzer
+  template:
+    metadata:
+      labels:
+        app: esg-analyzer
+    spec:
+      containers:
+      - name: esg-analyzer
+        image: ghcr.io/cookie579/esg-analyzer:0.1.0   # <— image tag to bump on every release
+        ports:
+          - containerPort: 8080
+        env:
+          - name: OPENAI_API_KEY              # example secret the Python code reads
+            valueFrom:
+              secretKeyRef:
+                name: esg-secrets
+                key: openai_api_key
+          - name: MODEL                      # simple config via ConfigMap
+            valueFrom:
+              configMapKeyRef:
+                name: esg-config
+                key: model
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "256Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
