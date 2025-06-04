@@ -1,0 +1,63 @@
+#############################################################################
+# values/kube-prometheus-values.yaml
+#
+# We keep Grafana enabled + sidecar so dashboards auto-load. We keep
+# nodeExporter/kubeStateMetrics. BUT we override Prometheus/Alertmanager
+# to use emptyDir (so no PVCs are needed).
+#############################################################################
+
+################################################################################
+# 1) Enable the chart’s built-in Grafana sub-chart (will install Grafana in monitoring/)
+################################################################################
+grafana:
+  enabled: true
+
+  # Tell the Grafana sidecar to import every ConfigMap labeled "grafana_dashboard"
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      folder: /var/lib/grafana/dashboards/default
+
+  # We expose Grafana as ClusterIP; you will port-forward to 3000
+  service:
+    type: ClusterIP
+
+################################################################################
+# 2) Keep Prometheus Operator CRDs & core components active
+################################################################################
+prometheusOperator:
+  createCustomResource: true
+
+################################################################################
+# 3) Enable the Kubernetes exporters you want
+################################################################################
+nodeExporter:
+  enabled: true
+
+kubeStateMetrics:
+  enabled: true
+
+################################################################################
+# 4) Override Prometheus/Alertmanager to use emptyDir (no PVC needed)
+################################################################################
+prometheus:
+  prometheusSpec:
+    # storageSpec tells Prometheus to use an ephemeral directory rather than PVC
+    storageSpec:
+      emptyDir: {}
+
+alertmanager:
+  alertmanagerSpec:
+    # storage tells Alertmanager to use an ephemeral directory instead of PVC
+    storage:
+      emptyDir: {}
+      
+################################################################################
+# 5) Disable pieces you don’t need right now (e.g. Alertmanager’s persistent alerts,
+#    etc.). Since we disabled storage above, Alertmanager is effectively ephemeral.
+################################################################################
+# (We already told alertmanager.storage → emptyDir)
+# You can also turn off Alertmanager entirely if you like:
+# alertmanager:
+#   enabled: false
