@@ -18,3 +18,11 @@ values/*-secrets.yaml
 .DS_Store
 .idea/
 .vscode/
+
+# --- Python Virtual Environments ---
+.venv/
+venv/
+
+# --- Python Cache ---
+__pycache__/
+*.pyc
