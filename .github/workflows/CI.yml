@@ -39,7 +39,7 @@ jobs:
 
     
     - name: 🔁 Argo CD sync
-      uses: clowdhaus/argo-cd-action@v2
+      uses: clowdhaus/argo-cd-action@v1.1.0
       with:
         server: ${{ secrets.ARGO_SERVER }}
         username: admin
