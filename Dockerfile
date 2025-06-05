@@ -17,5 +17,6 @@ COPY python/ ./python/
 # Set working directory to the app folder
 WORKDIR /app/python
 
-# Run your FastAPI app from get_apple_stock.py
-CMD ["uvicorn", "get_apple_stock:app", "--host", "0.0.0.0", "--port", "8080"]
+# Run your FastAPI app 
+CMD ["uvicorn", "preprocess_kinesis:app", "--host", "0.0.0.0", "--port", "8080"]
+

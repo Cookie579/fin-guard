@@ -3,3 +3,5 @@ fastapi.responses
 uvicorn[standard]
 pydantic
 yfinance
+boto3
+langdetect
