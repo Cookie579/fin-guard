@@ -34,8 +34,9 @@ jobs:
         context: .
         push: true
         tags: |
-          ghcr.io/${{ github.repository_owner }}/esg-analyzer:latest
-          ghcr.io/${{ github.repository_owner }}/esg-analyzer:${{ github.sha }}
+          ghcr.io/cookie579/esg-analyzer:latest
+          ghcr.io/cookie579/esg-analyzer:${{ github.sha }}
+
 
     
     - name: 🔁 Argo CD sync
