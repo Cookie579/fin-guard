@@ -2,7 +2,9 @@ name: Build & Push ESG-Analyzer
 
 on:
   push:
-    branches: [ main ]        # run only on pushes to main
+    branches: [ main ]
+    tags:
+      - 'v*'  # Triggers for version tags like v0.1.2
     paths:
       - "python/**"
       - "Dockerfile"
@@ -15,7 +17,7 @@ jobs:
 
     permissions:
       contents: read
-      packages: write   # <-- lets the workflow push to GHCR
+      packages: write   # Allows pushing to GHCR
 
     steps:
     - name: 🔄 Checkout
@@ -26,7 +28,7 @@ jobs:
       with:
         registry: ghcr.io
         username: ${{ github.actor }}
-        password: ${{ secrets.GHCR_PAT }}   # built-in PAT with package:write scope
+        password: ${{ secrets.GHCR_PAT }}
 
     - name: 🏗️ Build and push image
       uses: docker/build-push-action@v5
@@ -36,11 +38,10 @@ jobs:
         tags: |
           ghcr.io/cookie579/esg-analyzer:latest
           ghcr.io/cookie579/esg-analyzer:${{ github.sha }}
+          ghcr.io/cookie579/esg-analyzer:${{ github.ref_name }}
 
-
-    
     - name: 🔁 Argo CD sync
-      uses: clowdhaus/argo-cd-action@v1.1.0
+      uses: clowdhaus/argo-cd-action@v2.7.1
       with:
         server: ${{ secrets.ARGO_SERVER }}
         username: admin
