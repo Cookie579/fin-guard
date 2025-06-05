@@ -1,20 +1,20 @@
 # Use a lightweight Python image
 FROM python:3.12-slim
 
-# Set work directory inside container
+# Set working directory inside container
 WORKDIR /app
 
-# Copy requirements first (for better caching)
+# Copy requirements first for better layer caching
 COPY requirements.txt .
 
-# Install dependencies
+# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy source code into image
+# Copy your application code
 COPY python/ ./python/
 
-# Change to app folder if needed
+# Set working directory to the app folder
 WORKDIR /app/python
 
-# Run your app — update this line based on your framework
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
+# Run your FastAPI app from get_apple_stock.py
+CMD ["uvicorn", "get_apple_stock:app", "--host", "0.0.0.0", "--port", "8080"]
