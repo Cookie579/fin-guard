@@ -1,5 +1,4 @@
 # Use a lightweight Python image
-# Trigger GitHub Actions
 
 FROM python:3.12-slim
 
