@@ -18,7 +18,7 @@ spec:
         - name: ghcr-creds
       containers:
       - name: esg-analyzer
-        image: ghcr.io/cookie579/esg-analyzer:0.1.0   # <— image tag to bump on every release
+        image: ghcr.io/cookie579/esg-analyzer:0.1.1   # <— image tag to bump on every release
         ports:
           - containerPort: 8080
         env:
