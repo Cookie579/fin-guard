@@ -14,6 +14,8 @@ spec:
       labels:
         app: esg-analyzer
     spec:
+      imagePullSecrets:
+        - name: ghcr-creds
       containers:
       - name: esg-analyzer
         image: ghcr.io/cookie579/esg-analyzer:0.1.0   # <— image tag to bump on every release
