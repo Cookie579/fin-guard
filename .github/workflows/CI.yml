@@ -1,0 +1,48 @@
+name: Build & Push ESG-Analyzer
+
+on:
+  push:
+    branches: [ main ]        # run only on pushes to main
+    paths:
+      - "python/**"
+      - "Dockerfile"
+      - ".github/workflows/ci.yml"
+      - "requirements.txt"
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write   # <-- lets the workflow push to GHCR
+
+    steps:
+    - name: 🔄 Checkout
+      uses: actions/checkout@v4
+
+    - name: 🐳 Log in to GHCR
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}   # built-in PAT with package:write scope
+
+    - name: 🏗️ Build and push image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        push: true
+        tags: |
+          ghcr.io/${{ github.repository_owner }}/esg-analyzer:latest
+          ghcr.io/${{ github.repository_owner }}/esg-analyzer:${{ github.sha }}
+
+    
+    - name: 🔁 Argo CD sync
+      uses: clowdhaus/argo-cd-action@v2
+      with:
+        server: ${{ secrets.ARGO_SERVER }}
+        username: admin
+        password: ${{ secrets.ARGO_PASSWORD }}
+        appName: esg-analyzer
+        sync: true
