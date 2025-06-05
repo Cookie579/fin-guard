@@ -1,4 +1,4 @@
-# Use a lightweight Python image 2
+# Use a lightweight Python image 3
 
 FROM python:3.12-slim
 
