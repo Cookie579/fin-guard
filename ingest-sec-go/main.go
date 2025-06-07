@@ -1,3 +1,9 @@
+package main
+
+import (
+	"log"
+)
+
 func main() {
 	log.Println("🚀 Starting ingest-sec-go...")
 
@@ -9,7 +15,6 @@ func main() {
 	log.Printf("📦 Fetched %d filings", len(filings))
 
 	for _, filing := range filings {
-		// Kinesis
 		err := PublishToKinesis(filing)
 		if err != nil {
 			log.Printf("❌ Error publishing to Kinesis: %v", err)
@@ -17,7 +22,6 @@ func main() {
 			log.Printf("✅ Published filing to Kinesis: %s (%s)", filing.CompanyName, filing.FormType)
 		}
 
-		// S3
 		err = SaveToS3(filing)
 		if err != nil {
 			log.Printf("❌ Error saving to S3: %v", err)
