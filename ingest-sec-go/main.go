@@ -15,11 +15,14 @@ func main() {
 	log.Printf("📦 Fetched %d filings", len(filings))
 
 	for _, filing := range filings {
-		err := PublishToKinesis(filing)
-		if err != nil {
+		if err := PublishToKinesis(filing); err != nil {
 			log.Printf("❌ Error publishing to Kinesis: %v", err)
 		} else {
 			log.Printf("✅ Published filing to Kinesis: %s (%s)", filing.CompanyName, filing.FormType)
+		}
+
+		if err := SaveToS3(filing); err != nil {
+			log.Printf("❌ Error saving to S3: %v", err)
 		}
 	}
 }
