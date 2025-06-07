@@ -3,7 +3,7 @@ import json
 from langdetect import detect
 from s3_uploader import upload_to_s3
 
-STREAM_NAME = "your-kinesis-stream-name"
+STREAM_NAME = "fin-guard-stream"
 REGION = "us-east-1"
 
 def clean_text(text):
