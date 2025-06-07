@@ -9,6 +9,9 @@ service:
   type: ClusterIP
   port: 8080
 
+imagePullSecrets:
+  - name: ghcr-creds
+
 serviceAccount:
   name: preprocess-python-sa
   roleArn: arn:aws:iam::084071638445:role/preprocess-irsa-role
