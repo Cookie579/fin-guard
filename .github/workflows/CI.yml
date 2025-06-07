@@ -7,8 +7,11 @@ on:
       - 'v*'
     paths:
       - "python/**"
+      - "ingest-sec-go/**"
+      - fin-guard/k8s/helm/preprocess-python/**"
       - "Dockerfile"
       - "Dockerfile.preprocess-python"
+      - "Dockerfile.ingest-sec-go"
       - ".github/workflows/ci.yml"
       - "requirements.txt"
 
@@ -52,3 +55,15 @@ jobs:
           ghcr.io/cookie579/preprocess-python:latest
           ghcr.io/cookie579/preprocess-python:${{ github.sha }}
           ghcr.io/cookie579/preprocess-python:${{ github.ref_name }}
+    
+    - name: 🏗️ Build & push Ingest-Sec-Go image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: Dockerfile.ingest-sec-go
+        push: true
+        tags: |
+          ghcr.io/cookie579/ingest-sec-go:latest
+          ghcr.io/cookie579/ingest-sec-go:${{ github.sha }}
+          ghcr.io/cookie579/ingest-sec-go:${{ github.ref_name }}
+

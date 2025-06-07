@@ -1,0 +1,5 @@
+apiVersion: v2
+name: ingest-sec-go
+description: Helm chart for ingest-sec-go
+version: 0.1.0
+appVersion: "latest"
