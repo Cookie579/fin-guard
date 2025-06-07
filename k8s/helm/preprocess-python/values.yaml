@@ -1,7 +1,7 @@
 replicaCount: 1
 
 image:
-  repository: ghcr.io/Cookie579/preprocess-python
+  repository: ghcr.io/cookie579/preprocess-python
   tag: latest
   pullPolicy: IfNotPresent
 
