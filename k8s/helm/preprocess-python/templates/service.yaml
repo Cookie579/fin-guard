@@ -3,9 +3,9 @@ kind: Service
 metadata:
   name: {{ include "preprocess-python.fullname" . }}
 spec:
-  type: {{ .Values.service.type }}
+  type: ClusterIP
   selector:
     app: {{ include "preprocess-python.name" . }}
   ports:
-    - port: {{ .Values.service.port }}
+    - port: 8080
       targetPort: 8080

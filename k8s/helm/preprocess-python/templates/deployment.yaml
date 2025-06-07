@@ -12,10 +12,10 @@ spec:
       labels:
         app: {{ include "preprocess-python.name" . }}
     spec:
-      serviceAccountName: preprocess-python-sa   # ✅ This line is new!
+      serviceAccountName: {{ .Values.serviceAccount.name }}
       containers:
-      - name: preprocess-python
-        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-        imagePullPolicy: {{ .Values.image.pullPolicy }}
-        ports:
-        - containerPort: 8080
+        - name: preprocess-python
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: 8080
