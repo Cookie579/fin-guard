@@ -5,7 +5,7 @@ kinesis = boto3.client("kinesis", region_name="us-east-1")
 
 data = {
     "company": "OpenAI",
-    "filing_id": "test-001",
+    "filing_id": "test-002",
     "text": "OpenAI has released a new language model that is making waves in the financial sector."
 }
 

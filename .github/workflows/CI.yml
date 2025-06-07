@@ -1,13 +1,15 @@
-name: Build & Push ESG-Analyzer
+name: Build & Push ESG-Analyzer and Preprocess-Python
 
 on:
   push:
     branches: [ main ]
     tags:
-      - 'v*'  # Triggers for version tags like v0.1.2
+      - 'v*'
     paths:
       - "python/**"
+      - "preprocess-python/**"
       - "Dockerfile"
+      - "preprocess-python/Dockerfile"
       - ".github/workflows/ci.yml"
       - "requirements.txt"
 
@@ -17,7 +19,7 @@ jobs:
 
     permissions:
       contents: read
-      packages: write   # Allows pushing to GHCR
+      packages: write
 
     steps:
     - name: 🔄 Checkout
@@ -30,21 +32,24 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GHCR_PAT }}
 
-    - name: 🏗️ Build and push image
+    - name: 🏗️ Build & push ESG Analyzer image
       uses: docker/build-push-action@v5
       with:
         context: .
+        file: Dockerfile
         push: true
         tags: |
           ghcr.io/cookie579/esg-analyzer:latest
           ghcr.io/cookie579/esg-analyzer:${{ github.sha }}
           ghcr.io/cookie579/esg-analyzer:${{ github.ref_name }}
 
-    - name: 🔁 Argo CD sync
-      uses: clowdhaus/argo-cd-action@v2.3.0
+    - name: 🏗️ Build & push Preprocess-Python image
+      uses: docker/build-push-action@v5
       with:
-        server: ${{ secrets.ARGO_SERVER }}
-        username: admin
-        password: ${{ secrets.ARGO_PASSWORD }}
-        appName: esg-analyzer
-        sync: true
+        context: ./preprocess-python
+        file: ./preprocess-python/Dockerfile
+        push: true
+        tags: |
+          ghcr.io/cookie579/preprocess-python:latest
+          ghcr.io/cookie579/preprocess-python:${{ github.sha }}
+          ghcr.io/cookie579/preprocess-python:${{ github.ref_name }}
