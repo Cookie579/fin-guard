@@ -12,6 +12,7 @@ spec:
       labels:
         app: {{ include "preprocess-python.name" . }}
     spec:
+      serviceAccountName: preprocess-python-sa   # ✅ This line is new!
       containers:
       - name: preprocess-python
         image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
