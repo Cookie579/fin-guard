@@ -7,9 +7,8 @@ on:
       - 'v*'
     paths:
       - "python/**"
-      - "preprocess-python/**"
       - "Dockerfile"
-      - "preprocess-python/Dockerfile"
+      - "Dockerfile.preprocess-python"
       - ".github/workflows/ci.yml"
       - "requirements.txt"
 
@@ -46,8 +45,8 @@ jobs:
     - name: 🏗️ Build & push Preprocess-Python image
       uses: docker/build-push-action@v5
       with:
-        context: ./preprocess-python
-        file: ./preprocess-python/Dockerfile
+        context: .
+        file: Dockerfile.preprocess-python
         push: true
         tags: |
           ghcr.io/cookie579/preprocess-python:latest
