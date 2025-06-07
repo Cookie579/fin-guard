@@ -5,6 +5,9 @@ image:
   pullPolicy: IfNotPresent
   tag: latest
 
+imagePullSecrets:
+  - name: ghcr-creds
+
 service:
   type: ClusterIP
   port: 8080

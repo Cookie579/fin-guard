@@ -12,6 +12,8 @@ spec:
       labels:
         app: ingest-sec-go
     spec:
+      imagePullSecrets:
+        - name: ghcr-creds  # Make sure this secret exists in the namespace
       containers:
         - name: ingest-sec-go
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
