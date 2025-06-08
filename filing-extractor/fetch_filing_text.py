@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Batch fetch 10-K submissions from EDGAR, convert them to clean plain-text,
+Batch fetch SEC submissions from EDGAR, convert them to clean plain-text,
 and save each as ./texts/<Company>/<Form Type>/<Company>__<Date>__<Form Type>.txt
 """
 import requests, re, sys, html, warnings, json
@@ -15,10 +15,10 @@ if sys.stdout.encoding.lower() != "utf-8":
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
 # ───────────────────────── Text Cleaning ─────────────────────────
-def clean_10k_block(raw_block: str) -> str:
+def clean_filing_block(raw_block: str) -> str:
     m = re.search(r"<TEXT>(.*?)</TEXT>", raw_block, flags=re.S | re.I)
     if not m:
-        raise ValueError("No <TEXT> section inside 10-K document")
+        raise ValueError("No <TEXT> section inside filing document")
     soup = BeautifulSoup(m.group(1), "html.parser")
     for br in soup.find_all(["br", "p", "tr", "table", "div"]):
         br.append("\n")
@@ -28,7 +28,7 @@ def clean_10k_block(raw_block: str) -> str:
     text = re.sub(r"\n{2,}", "\n\n", text)
     return text.strip()
 
-def extract_filing_text(index_url: str) -> str:
+def extract_filing_text(index_url: str, form_type: str) -> str:
     headers = {
         "User-Agent": "finguard <esg.finguard@gmail.com>",
         "Accept": "text/plain, */*; q=0.1",
@@ -38,10 +38,11 @@ def extract_filing_text(index_url: str) -> str:
     resp.raise_for_status()
 
     docs = resp.text.split("<DOCUMENT>")
-    tenk_block = next((d for d in docs if "<TYPE>10-K" in d), None)
-    if not tenk_block:
-        raise Exception(f"No <DOCUMENT> TYPE 10-K found in {txt_url}")
-    return clean_10k_block(tenk_block)
+    target_type = form_type.upper().strip()
+    block = next((d for d in docs if f"<TYPE>{target_type}" in d), None)
+    if not block:
+        raise Exception(f"No <DOCUMENT> TYPE {target_type} found in {txt_url}")
+    return clean_filing_block(block)
 
 # ───────────────────────── Main Batch Loop ─────────────────────────
 def main():
@@ -63,7 +64,7 @@ def main():
                 continue
 
             safe_company = company.replace(" ", "_").replace("/", "-")
-            safe_form    = form.replace("/", "-")
+            safe_form    = form.replace("/", "-").replace(" ", "_")
 
             out_dir = Path("texts") / safe_company / safe_form
             out_dir.mkdir(parents=True, exist_ok=True)
@@ -73,7 +74,7 @@ def main():
                 print(f"✅ Skipping existing: {out_file.name}")
                 continue
 
-            cleaned = extract_filing_text(url)
+            cleaned = extract_filing_text(url, form)
             out_file.write_text(cleaned, encoding="utf-8")
             print(f"✅ Saved → {out_file.relative_to(Path.cwd())}")
 

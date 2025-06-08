@@ -13,13 +13,13 @@ LOCAL_TXT_PATH = Path("temp.txt")
 
 s3 = boto3.client("s3")
 
-def list_all_10k_json_keys():
+def list_all_json_keys():
     keys = []
     paginator = s3.get_paginator('list_objects_v2')
     for page in paginator.paginate(Bucket=BUCKET):
         for obj in page.get("Contents", []):
             key = obj["Key"]
-            if key.endswith(".json") and "/" in key:
+            if key.endswith(".json") and "/filing-jsons/" in key:
                 keys.append(key)
     return keys
 
@@ -27,17 +27,23 @@ def sanitize_name(name):
     return name.strip().replace("/", "-").replace(" ", "_")
 
 def download_json_from_s3(key):
-    company_name = sanitize_name(key.split("/")[0])
-    local_dir = BASE_JSON_DIR / company_name
+    parts = key.split("/")
+    if len(parts) < 4:
+        print(f"⚠️ Unexpected key structure: {key}")
+        return None, None, None
+
+    company_name = sanitize_name(parts[0])
+    form_type = sanitize_name(parts[2])
+    local_dir = BASE_JSON_DIR / company_name / form_type
     local_dir.mkdir(parents=True, exist_ok=True)
 
     local_path = local_dir / Path(key).name
     s3.download_file(BUCKET, key, str(local_path))
-    return local_path
+    return local_path, company_name, form_type
 
-def fetch_and_save_text(index_url, company_name, filing_date):
+def fetch_and_save_text(index_url, company_name, filing_date, form_type):
     result = subprocess.run(
-        ["python", "fetch_filing_text.py", index_url, company_name, filing_date],
+        ["python", "fetch_filing_text.py", index_url, company_name, filing_date, form_type],
         capture_output=True,
         text=True
     )
@@ -45,21 +51,22 @@ def fetch_and_save_text(index_url, company_name, filing_date):
         print("❌ Script error:\n", result.stderr)
         return False
 
-    safe_name = f"{company_name}_{filing_date}_-_10-K.txt".replace(" ", "_")
-    filing_path = Path("texts") / "10-k" / safe_name
+    safe_name = f"{company_name}__{filing_date}__{form_type}.txt"
+    filing_path = Path("texts") / company_name / form_type / safe_name
     if filing_path.exists():
-        LOCAL_TXT_PATH.write_text(filing_path.read_text(), encoding="utf-8")
+        content = filing_path.read_text(encoding="utf-8", errors="replace")
+        LOCAL_TXT_PATH.write_text(content, encoding="utf-8")
         filing_path.unlink()
         return True
     return False
 
-def upload_cleaned_to_s3(company_name, filing_date):
-    s3_key = f"{company_name}/texts/10-k/{filing_date}.txt"
+def upload_cleaned_to_s3(company_name, filing_date, form_type):
+    s3_key = f"{company_name}/texts/{form_type}/{filing_date}.txt"
     s3.upload_file(str(LOCAL_TXT_PATH), BUCKET, s3_key)
     print(f"✅ Uploaded to s3://{BUCKET}/{s3_key}")
 
-def already_uploaded(company_name, filing_date):
-    key = f"{company_name}/texts/10-k/{filing_date}.txt"
+def already_uploaded(company_name, filing_date, form_type):
+    key = f"{company_name}/texts/{form_type}/{filing_date}.txt"
     try:
         s3.head_object(Bucket=BUCKET, Key=key)
         return True
@@ -67,26 +74,27 @@ def already_uploaded(company_name, filing_date):
         return False
 
 def process_all():
-    keys = list_all_10k_json_keys()
+    keys = list_all_json_keys()
     for key in keys:
         print(f"\n📄 Processing {key}...")
-        json_path = download_json_from_s3(key)
-        data = json.loads(json_path.read_text())
-
-        url     = data.get("linkToFilingDetails")
-        date    = data.get("filingDate")
-        company = sanitize_name(data.get("companyName", "Unknown"))
-
-        if not url or not date:
-            print("⚠️ Missing link or date in JSON")
+        json_path, company, form_type = download_json_from_s3(key)
+        if not json_path:
             continue
 
-        if already_uploaded(company, date):
+        data = json.loads(json_path.read_text())
+        url       = data.get("linkToFilingDetails")
+        date      = data.get("filingDate")
+
+        if not url or not date or not company or not form_type:
+            print("⚠️ Missing required fields in JSON.")
+            continue
+
+        if already_uploaded(company, date, form_type):
             print("✔️ Already uploaded, skipping.")
             continue
 
-        if fetch_and_save_text(url, company, date):
-            upload_cleaned_to_s3(company, date)
+        if fetch_and_save_text(url, company, date, form_type):
+            upload_cleaned_to_s3(company, date, form_type)
             LOCAL_TXT_PATH.unlink(missing_ok=True)
             time.sleep(0.5)
         else:

@@ -25,9 +25,12 @@ func SaveToS3(filing Filing) error {
 		return err
 	}
 
-	// ✅ Use sanitized company name as folder
-	safeCompany := sanitizePath(filing.CompanyName)
-	key := fmt.Sprintf("%s/%s-%s.json", safeCompany, filing.FormType, filing.FilingDate)
+	// Sanitize folder and file names
+	company := strings.ReplaceAll(filing.CompanyName, " ", "_")
+	form := strings.ReplaceAll(filing.FormType, "/", "-")
+	date := filing.FilingDate
+
+	key := fmt.Sprintf("%s/filing-jsons/%s/%s-%s-%s.json", company, form, company, form, date)
 
 	_, err = s3svc.PutObject(&s3.PutObjectInput{
 		Bucket: aws.String(bucketName),
@@ -38,9 +41,10 @@ func SaveToS3(filing Filing) error {
 		return err
 	}
 
-	log.Printf("✅ Saved filing to S3: s3://%s/%s", bucketName, key)
+	log.Printf("✅ Saved filing JSON to S3: %s", key)
 	return nil
 }
+
 
 // sanitizePath makes a string safe for use as an S3 path segment
 func sanitizePath(name string) string {
