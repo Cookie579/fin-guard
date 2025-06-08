@@ -27,7 +27,19 @@ type SECSubmission struct {
 	} `json:"filings"`
 }
 
-// Accepts a Company struct, returns all 10-K filings
+var allowedForms = map[string]bool{
+	"10-K": true,
+	"10-Q": true,
+	"8-K": true,
+	"DEF 14A": true,
+	"20-F": true,
+	"40-F": true,
+	"SD": true,
+	"S-1": true,
+	"F-1": true,
+}
+
+// Accepts a Company struct, returns all filings that match allowed forms
 func FetchRecentFilings(company Company) ([]Filing, error) {
 	url := fmt.Sprintf("https://data.sec.gov/submissions/CIK%s.json", company.CIK)
 
@@ -58,7 +70,8 @@ func FetchRecentFilings(company Company) ([]Filing, error) {
 	cikStripped := stripLeadingZeros(company.CIK)
 
 	for i := range submission.Filings.Recent.Form {
-		if submission.Filings.Recent.Form[i] == "10-K" {
+		formType := submission.Filings.Recent.Form[i]
+		if allowedForms[formType] {
 			accession := submission.Filings.Recent.Accession[i]
 			accessionNoDashes := removeDashes(accession)
 
@@ -67,7 +80,7 @@ func FetchRecentFilings(company Company) ([]Filing, error) {
 
 			filings = append(filings, Filing{
 				CompanyName: company.Name,
-				FormType:    "10-K",
+				FormType:    formType,
 				FilingDate:  submission.Filings.Recent.FilingDate[i],
 				Link:        indexURL,
 			})
