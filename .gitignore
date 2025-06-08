@@ -28,6 +28,6 @@ __pycache__/
 *.pyc
 
 # --- Filing Extractor Output ---
-fin-guard/filing-extractor/texts/
-fin-guard/filing-extractor/filing-jsons/
-fin-guard/filing-extractor/esg-outputs/
+filing-extractor/texts/
+filing-extractor/filing-jsons/
+filing-extractor/esg-outputs/

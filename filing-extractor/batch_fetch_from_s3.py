@@ -6,8 +6,6 @@ import time
 
 # AWS S3 Configuration
 BUCKET = "fin-processed-filings"
-PREFIX = "Apple Inc./"  # You can generalize this later to support other companies
-CLEANED_SUBDIR = "texts/10-k"
 
 # Local paths
 BASE_JSON_DIR = Path("filing-jsons")
@@ -15,12 +13,21 @@ LOCAL_TXT_PATH = Path("temp.txt")
 
 s3 = boto3.client("s3")
 
-def list_10k_json_keys():
-    response = s3.list_objects_v2(Bucket=BUCKET, Prefix=PREFIX)
-    return [obj["Key"] for obj in response.get("Contents", []) if obj["Key"].endswith(".json")]
+def list_all_10k_json_keys():
+    keys = []
+    paginator = s3.get_paginator('list_objects_v2')
+    for page in paginator.paginate(Bucket=BUCKET):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            if key.endswith(".json") and "/" in key:
+                keys.append(key)
+    return keys
+
+def sanitize_name(name):
+    return name.strip().replace("/", "-").replace(" ", "_")
 
 def download_json_from_s3(key):
-    company_name = key.split("/")[0].strip().replace("/", "-").replace(" ", "_")
+    company_name = sanitize_name(key.split("/")[0])
     local_dir = BASE_JSON_DIR / company_name
     local_dir.mkdir(parents=True, exist_ok=True)
 
@@ -42,7 +49,7 @@ def fetch_and_save_text(index_url, company_name, filing_date):
     filing_path = Path("texts") / "10-k" / safe_name
     if filing_path.exists():
         LOCAL_TXT_PATH.write_text(filing_path.read_text(), encoding="utf-8")
-        filing_path.unlink()  # remove temp copy
+        filing_path.unlink()
         return True
     return False
 
@@ -60,7 +67,7 @@ def already_uploaded(company_name, filing_date):
         return False
 
 def process_all():
-    keys = list_10k_json_keys()
+    keys = list_all_10k_json_keys()
     for key in keys:
         print(f"\n📄 Processing {key}...")
         json_path = download_json_from_s3(key)
@@ -68,7 +75,7 @@ def process_all():
 
         url     = data.get("linkToFilingDetails")
         date    = data.get("filingDate")
-        company = data.get("companyName", "Unknown").replace("/", "-")
+        company = sanitize_name(data.get("companyName", "Unknown"))
 
         if not url or not date:
             print("⚠️ Missing link or date in JSON")

@@ -114,7 +114,16 @@ def is_human_text(chunk: str, max_tag_ratio: float = TAG_RATIO_MAX) -> bool:
 # ────────────────────────────────────────────────────────────────
 # MAIN
 # ────────────────────────────────────────────────────────────────
-def main():
+
+# Allow passing custom input/output paths from batch script
+def main(input_file=None, output_file=None):
+    global INPUT_FILE, OUTPUT_FILE
+
+    if input_file:
+        INPUT_FILE = str(input_file)
+    if output_file:
+        OUTPUT_FILE = str(output_file)
+
     print("📖 Loading 10-K …")
     raw = load_text(INPUT_FILE)
 
@@ -192,7 +201,9 @@ def main():
         texts = [r["text"] for r in results if cat in r["esg_categories"]]
         if len(texts) < TOPIC_MIN_CLUSTER:
             continue
-        umap_model = UMAP(n_components=5, random_state=42)
+        n_topics = len(texts)
+        n_components = min(5, max(2, n_topics - 1))  # clamp to [2,4] for small data
+        umap_model = UMAP(n_components=n_components, random_state=42)
         cluster_model = HDBSCAN(min_samples=TOPIC_MIN_SAMPLES, 
                                 min_cluster_size=TOPIC_MIN_CLUSTER)
         tm = BERTopic(umap_model=umap_model, hdbscan_model=cluster_model)
