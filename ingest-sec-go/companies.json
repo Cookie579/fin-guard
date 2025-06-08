@@ -1,0 +1,14 @@
+{
+  "companies": [
+    {
+      "name": "Apple",
+      "ticker": "AAPL",
+      "cik": "0000320193"
+    },
+    {
+      "name": "Microsoft",
+      "ticker": "MSFT",
+      "cik": "0000789019"
+    }
+  ]
+}

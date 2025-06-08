@@ -15,28 +15,27 @@ type Filing struct {
 }
 
 type SECSubmission struct {
-	CIK        string `json:"cik"`
-	Company    string `json:"name"`
-	Filings    struct {
+	CIK     string `json:"cik"`
+	Company string `json:"name"`
+	Filings struct {
 		Recent struct {
-			Form      []string `json:"form"`
+			Form       []string `json:"form"`
 			FilingDate []string `json:"filingDate"`
-			Accession []string `json:"accessionNumber"`
+			Accession  []string `json:"accessionNumber"`
 			PrimaryDoc []string `json:"primaryDocument"`
 		} `json:"recent"`
 	} `json:"filings"`
 }
 
-func FetchRecentFilings() ([]Filing, error) {
-	cik := "0000320193" // Apple Inc.
-	cikStripped := cik[3:] // remove leading zeroes
-	url := fmt.Sprintf("https://data.sec.gov/submissions/CIK%s.json", cik)
+// Accepts a Company struct, returns all 10-K filings
+func FetchRecentFilings(company Company) ([]Filing, error) {
+	url := fmt.Sprintf("https://data.sec.gov/submissions/CIK%s.json", company.CIK)
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "Fin-guard fin-guard@gmail.com") 
+	req.Header.Set("User-Agent", "Fin-guard fin-guard@gmail.com")
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
@@ -56,6 +55,8 @@ func FetchRecentFilings() ([]Filing, error) {
 	}
 
 	var filings []Filing
+	cikStripped := stripLeadingZeros(company.CIK)
+
 	for i := range submission.Filings.Recent.Form {
 		if submission.Filings.Recent.Form[i] == "10-K" {
 			accession := submission.Filings.Recent.Accession[i]
@@ -65,8 +66,8 @@ func FetchRecentFilings() ([]Filing, error) {
 				cikStripped, accessionNoDashes, accession)
 
 			filings = append(filings, Filing{
-				CompanyName: submission.Company,
-				FormType:    submission.Filings.Recent.Form[i],
+				CompanyName: company.Name,
+				FormType:    "10-K",
 				FilingDate:  submission.Filings.Recent.FilingDate[i],
 				Link:        indexURL,
 			})
@@ -84,4 +85,13 @@ func removeDashes(s string) string {
 		}
 	}
 	return out
+}
+
+func stripLeadingZeros(cik string) string {
+	for i, ch := range cik {
+		if ch != '0' {
+			return cik[i:]
+		}
+	}
+	return cik
 }

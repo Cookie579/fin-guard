@@ -26,3 +26,8 @@ venv/
 # --- Python Cache ---
 __pycache__/
 *.pyc
+
+# --- Filing Extractor Output ---
+fin-guard/filing-extractor/texts/
+fin-guard/filing-extractor/filing-jsons/
+fin-guard/filing-extractor/esg-outputs/

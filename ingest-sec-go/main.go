@@ -7,26 +7,37 @@ import (
 func main() {
 	log.Println("🚀 Starting ingest-sec-go...")
 
-	filings, err := FetchRecentFilings()
+	// Load companies from JSON config
+	companies, err := LoadCompanies("companies.json")
 	if err != nil {
-		log.Fatalf("❌ Error fetching filings: %v", err)
+		log.Fatalf("❌ Failed to load companies: %v", err)
 	}
 
-	log.Printf("📦 Fetched %d filings", len(filings))
+	for _, company := range companies {
+		log.Printf("🔍 Fetching filings for %s (%s)", company.Name, company.CIK)
 
-	for _, filing := range filings {
-		err := PublishToKinesis(filing)
+		filings, err := FetchRecentFilings(company)
 		if err != nil {
-			log.Printf("❌ Error publishing to Kinesis: %v", err)
-		} else {
-			log.Printf("✅ Published filing to Kinesis: %s (%s)", filing.CompanyName, filing.FormType)
+			log.Printf("❌ Error fetching filings for %s: %v", company.Name, err)
+			continue
 		}
 
-		err = SaveToS3(filing)
-		if err != nil {
-			log.Printf("❌ Error saving to S3: %v", err)
-		} else {
-			log.Printf("✅ Saved filing to S3: %s (%s)", filing.CompanyName, filing.FormType)
+		log.Printf("📦 %d filings found for %s", len(filings), company.Name)
+
+		for _, filing := range filings {
+			err := PublishToKinesis(filing)
+			if err != nil {
+				log.Printf("❌ Kinesis error: %v", err)
+			} else {
+				log.Printf("✅ Published to Kinesis: %s (%s)", filing.CompanyName, filing.FormType)
+			}
+
+			err = SaveToS3(filing)
+			if err != nil {
+				log.Printf("❌ S3 error: %v", err)
+			} else {
+				log.Printf("✅ Saved to S3: %s (%s)", filing.CompanyName, filing.FormType)
+			}
 		}
 	}
 }

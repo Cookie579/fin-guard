@@ -1,14 +1,3 @@
-"""
-Advanced ESG extractor with noise filtering and GPU acceleration:
-  • Noise filter for non-ESG boilerplate
-  • Zero-shot ESG relevance check
-  • Zero-shot ESG + risk classification (via BART-MNLI)
-  • Sliding-window chunking
-  • Ontology expansion (WordNet)
-  • Named-entity extraction (spaCy)
-  • Topic modeling per ESG category (BERTopic) with dynamic HDBSCAN
-"""
-
 import re
 import json
 from pathlib import Path
@@ -27,8 +16,8 @@ from umap import UMAP
 # ────────────────────────────────────────────────────────────────
 # CONFIG
 # ────────────────────────────────────────────────────────────────
-INPUT_FILE           = "fin-guard/filing-extractor/output-10k.txt"
-OUTPUT_FILE          = "fin-guard/filing-extractor/output-esg-advanced.json"
+INPUT_FILE           = "texts/10-k/Apple_Inc.__2014-10-27__10-K.txt"
+OUTPUT_FILE          = "output-esg-advanced.json"
 WINDOW_SIZE          = 5     # sentences per chunk
 STRIDE               = 2     # overlap stride
 MIN_CHARS            = 300
@@ -39,9 +28,23 @@ TAG_RATIO_MAX        = 0.3   # max ratio of tag-like tokens
 TOPIC_MIN_CLUSTER    = 2     # min cluster size for topic modeling
 TOPIC_MIN_SAMPLES    = 1     # min samples for HDBSCAN
 
-COMPANY_NAME = "Apple Inc."
-FILING_DATE  = "2023-10-27"
-FORM_TYPE    = "10-K"
+
+input_path = Path(INPUT_FILE)
+filename   = input_path.stem  # "Apple_Inc.__2014-10-27__10-K"
+
+try:
+    parts = filename.split("__")
+    SAFE_COMPANY = parts[0]
+    FILING_DATE  = parts[1]
+    FORM_TYPE    = parts[2]
+except Exception:
+    raise ValueError(f"❌ Could not parse metadata from filename: {filename}")
+
+COMPANY_NAME = SAFE_COMPANY.replace("_", " ")  # for pretty printing
+
+# Dynamic output path
+OUTPUT_FILE = f"esg-outputs/10-k/{SAFE_COMPANY}__{FILING_DATE}__{FORM_TYPE}.json"
+
 
 # seed keywords for ontology expansion
 SEED_KEYWORDS = {
@@ -84,22 +87,24 @@ ESG_KEYWORDS = expand_keywords(SEED_KEYWORDS)
 # ────────────────────────────────────────────────────────────────
 
 def load_text(path: str) -> str:
-    return Path(path).read_text(encoding="utf-8")
+    text = Path(path).read_text(encoding="utf-8")
+    # Preserve and isolate section headers (e.g., "ITEM 1.", "TABLE OF CONTENTS")
+    header_pattern = r"^(ITEM\s+\d+[A-Z\-\. ]+|TABLE OF CONTENTS|PART\s+[I|II|III|IV])"
+    return re.sub(header_pattern, r"\n\1\n", text, flags=re.IGNORECASE | re.MULTILINE)
 
 def split_into_chunks(doc, window=WINDOW_SIZE, stride=STRIDE):
     sents = list(doc.sents)
     for i in range(0, len(sents), stride):
-        chunk = " ".join(s.text.strip() for s in sents[i : i + window])
+        chunk_sents = sents[i : i + window]
+        chunk = " ".join(s.text.strip() for s in chunk_sents)
         if len(chunk) >= MIN_CHARS:
             yield chunk
-
 
 def highlight_all(text: str) -> str:
     for kws in ESG_KEYWORDS.values():
         for kw in kws:
             text = re.sub(rf"\b({re.escape(kw)})\b", r"**\1**", text, flags=re.IGNORECASE)
     return text
-
 
 def is_human_text(chunk: str, max_tag_ratio: float = TAG_RATIO_MAX) -> bool:
     tokens = re.findall(r"\S+", chunk)
@@ -167,7 +172,9 @@ def main():
         risks = {lbl: round(sc, 3) for lbl, sc in zip(risk_out["labels"], risk_out["scores"]) if sc >= RISK_THRESH}
 
         ent_doc = nlp(chunk)
-        entities = [{"text": ent.text, "label": ent.label_} for ent in ent_doc.ents if ent.label_ in {"PERSON","ORG","LAW"}]
+        entities = [{"text": ent.text, "label": ent.label_} 
+                    for ent in ent_doc.ents 
+                    if ent.label_ in {"PERSON","ORG","LAW"}]
 
         results.append({
             "text": highlight_all(chunk),
@@ -183,18 +190,14 @@ def main():
     topic_info = {}
     for cat in ESG_KEYWORDS.keys():
         texts = [r["text"] for r in results if cat in r["esg_categories"]]
-        # Skip categories with too few texts
         if len(texts) < TOPIC_MIN_CLUSTER:
             continue
         umap_model = UMAP(n_components=5, random_state=42)
-        cluster_model = HDBSCAN(min_samples=TOPIC_MIN_SAMPLES, min_cluster_size=TOPIC_MIN_CLUSTER)
+        cluster_model = HDBSCAN(min_samples=TOPIC_MIN_SAMPLES, 
+                                min_cluster_size=TOPIC_MIN_CLUSTER)
         tm = BERTopic(umap_model=umap_model, hdbscan_model=cluster_model)
         topics, probs = tm.fit_transform(texts)
-        freq_df = tm.get_topic_freq()
-        freq_df = freq_df.rename(columns={
-            "Topic": "topic",
-            "Count": "count"
-        })
+        freq_df = tm.get_topic_freq().rename(columns={"Topic":"topic","Count":"count"})
         freq_records = freq_df.to_dict(orient="records")
         terms = tm.get_topics()
         topic_info[cat] = {"frequencies": freq_records, "terms": terms}

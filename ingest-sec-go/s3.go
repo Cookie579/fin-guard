@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
@@ -24,7 +25,9 @@ func SaveToS3(filing Filing) error {
 		return err
 	}
 
-	key := fmt.Sprintf("%s/%s-%s.json", filing.CompanyName, filing.FormType, filing.FilingDate)
+	// ✅ Use sanitized company name as folder
+	safeCompany := sanitizePath(filing.CompanyName)
+	key := fmt.Sprintf("%s/%s-%s.json", safeCompany, filing.FormType, filing.FilingDate)
 
 	_, err = s3svc.PutObject(&s3.PutObjectInput{
 		Bucket: aws.String(bucketName),
@@ -35,6 +38,22 @@ func SaveToS3(filing Filing) error {
 		return err
 	}
 
-	log.Printf("✅ Saved filing to S3: %s", key)
+	log.Printf("✅ Saved filing to S3: s3://%s/%s", bucketName, key)
 	return nil
+}
+
+// sanitizePath makes a string safe for use as an S3 path segment
+func sanitizePath(name string) string {
+	// Replace spaces with underscores and remove problematic characters
+	name = strings.ReplaceAll(name, " ", "_")
+	var safe []rune
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') ||
+			(r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') ||
+			r == '_' || r == '-' {
+			safe = append(safe, r)
+		}
+	}
+	return string(safe)
 }
