@@ -29,15 +29,14 @@ type SECSubmission struct {
 
 func FetchRecentFilings() ([]Filing, error) {
 	cik := "0000320193" // Apple Inc.
+	cikStripped := cik[3:] // remove leading zeroes
 	url := fmt.Sprintf("https://data.sec.gov/submissions/CIK%s.json", cik)
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
-
-	// SEC requires a valid User-Agent
-	req.Header.Set("User-Agent", "YourName Contact@YourDomain.com")
+	req.Header.Set("User-Agent", "Fin-guard fin-guard@gmail.com") 
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
@@ -46,7 +45,10 @@ func FetchRecentFilings() ([]Filing, error) {
 	}
 	defer resp.Body.Close()
 
-	body, _ := ioutil.ReadAll(resp.Body)
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
 
 	var submission SECSubmission
 	if err := json.Unmarshal(body, &submission); err != nil {
@@ -56,19 +58,30 @@ func FetchRecentFilings() ([]Filing, error) {
 	var filings []Filing
 	for i := range submission.Filings.Recent.Form {
 		if submission.Filings.Recent.Form[i] == "10-K" {
-			link := fmt.Sprintf("https://www.sec.gov/Archives/edgar/data/%s/%s/%s",
-				cik[3:],                                 // remove leading zeroes for link
-				submission.Filings.Recent.Accession[i],
-				submission.Filings.Recent.PrimaryDoc[i],
-			)
+			accession := submission.Filings.Recent.Accession[i]
+			accessionNoDashes := removeDashes(accession)
+
+			indexURL := fmt.Sprintf("https://www.sec.gov/Archives/edgar/data/%s/%s/%s-index.htm",
+				cikStripped, accessionNoDashes, accession)
+
 			filings = append(filings, Filing{
 				CompanyName: submission.Company,
 				FormType:    submission.Filings.Recent.Form[i],
 				FilingDate:  submission.Filings.Recent.FilingDate[i],
-				Link:        link,
+				Link:        indexURL,
 			})
 		}
 	}
 
 	return filings, nil
+}
+
+func removeDashes(s string) string {
+	var out string
+	for _, ch := range s {
+		if ch != '-' {
+			out += string(ch)
+		}
+	}
+	return out
 }

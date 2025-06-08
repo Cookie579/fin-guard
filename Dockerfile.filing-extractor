@@ -1,0 +1,15 @@
+# syntax=docker/dockerfile:1
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install Python dependencies
+COPY filing-extractor/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy extractor code
+COPY filing-extractor/ .
+
+# Default command: run the extractor as a CLI tool
+ENTRYPOINT ["python", "fetch_filing_text.py"]
