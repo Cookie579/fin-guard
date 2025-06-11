@@ -6,7 +6,7 @@ import (
 	"io/ioutil"
 	"net/http"
 
-	"fin-guard/utils"
+	"github.com/Cookie579/fin-guard/utils"
 )
 
 // Keep this local to this file
