@@ -28,6 +28,6 @@ WORKDIR /root/
 COPY --from=builder /app/ingest-sec-go/ingest-sec-go .
 
 # Copy companies.json if needed
-COPY ingest-sec-go/companies.json .
+COPY companies.json .
 
 ENTRYPOINT ["./ingest-sec-go"]
