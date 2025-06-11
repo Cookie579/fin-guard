@@ -6,6 +6,8 @@ import (
 	"log"
 	"os"
 	"strings"
+
+	"github.com/Cookie579/fin-guard/config"
 )
 
 // Company structure matches your companies.json
@@ -37,6 +39,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("❌ Failed to load companies: %v", err)
 	}
+
+	cfg, err := config.Load("config.json")
+	if err != nil {
+		log.Fatalf("❌ Failed to load config: %v", err)
+	}
+
+	log.Printf("🔐 Google API Key: %s", cfg.GoogleAPIKey[:8]+"...")
 
 	for _, company := range companies {
 		log.Printf("🔍 Checking ESG reports for %s (%s)", company.Name, company.Domain)

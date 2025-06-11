@@ -10,6 +10,9 @@ override.tf.json
 # --- Helm chart values that contain secrets ---
 values/*-secrets.yaml
 
+# --- Other Secrets ---
+config.json
+
 # --- Kube configs / Tokens ---
 *.kubeconfig
 .kube/
