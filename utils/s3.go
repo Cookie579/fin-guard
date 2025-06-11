@@ -1,4 +1,4 @@
-package main
+package utils
 
 import (
 	"bytes"
@@ -44,7 +44,6 @@ func SaveToS3(filing Filing) error {
 	log.Printf("✅ Saved filing JSON to S3: %s", key)
 	return nil
 }
-
 
 // sanitizePath makes a string safe for use as an S3 path segment
 func sanitizePath(name string) string {

@@ -1,0 +1,28 @@
+# ────────────────────────────────
+# Stage 1: Build
+# ────────────────────────────────
+FROM golang:1.21-alpine AS builder
+WORKDIR /app
+
+# Copy Go module files and install dependencies
+COPY ingest-esg-go/go.mod ingest-esg-go/go.sum ./
+RUN go mod download
+
+# Copy source files
+COPY ingest-esg-go/ ./
+
+# Build the binary
+RUN go build -o ingest-esg-go .
+
+# ────────────────────────────────
+# Stage 2: Runtime (minimal)
+# ────────────────────────────────
+FROM alpine:latest
+WORKDIR /root/
+
+# Copy the built binary and config
+COPY --from=builder /app/ingest-esg-go .
+COPY --from=builder /app/companies.json .
+
+# Entrypoint
+ENTRYPOINT ["./ingest-esg-go"]

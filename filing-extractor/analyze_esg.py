@@ -16,17 +16,18 @@ from umap import UMAP
 # ────────────────────────────────────────────────────────────────
 # CONFIG
 # ────────────────────────────────────────────────────────────────
-INPUT_FILE           = "texts/10-k/Apple_Inc.__2014-10-27__10-K.txt"
-OUTPUT_FILE          = "output-esg-advanced.json"
-WINDOW_SIZE          = 5     # sentences per chunk
-STRIDE               = 2     # overlap stride
-MIN_CHARS            = 300
-ESG_THRESH           = 0.5   # min confidence for ESG labels
-RISK_THRESH          = 0.4   # min confidence for risk labels
-RELEVANCE_THRESH     = 0.7   # min confidence for ESG relevance
-TAG_RATIO_MAX        = 0.3   # max ratio of tag-like tokens
-TOPIC_MIN_CLUSTER    = 2     # min cluster size for topic modeling
-TOPIC_MIN_SAMPLES    = 1     # min samples for HDBSCAN
+INPUT_FILE             = "texts/Apple/10-k/Apple__2016-10-26__10-K.txt"
+OUTPUT_FILE            = "output-esg-advanced.json"
+WINDOW_SIZE            = 5     # sentences per chunk
+STRIDE                 = 2     # overlap stride
+MIN_CHARS              = 300
+ESG_THRESH             = 0.5   # min confidence for ESG labels
+RISK_THRESH            = 0.4   # min confidence for risk labels
+RELEVANCE_THRESH       = 0.7   # min confidence for ESG relevance
+TAG_RATIO_MAX          = 0.3   # max ratio of tag-like tokens
+TOPIC_MIN_CLUSTER      = 2     # min cluster size for topic modeling
+TOPIC_MIN_SAMPLES      = 1     # min samples for HDBSCAN
+TOPIC_MODEL_MIN_CHUNKS = 5     # minimum ESG chunks required for topic modeling
 
 
 input_path = Path(INPUT_FILE)
@@ -194,21 +195,80 @@ def main(input_file=None, output_file=None):
         })
 
     print(f"✅ Found {len(results)} ESG-relevant chunks.")
+    
+    if len(results) < TOPIC_MODEL_MIN_CHUNKS:
+        print(f"⚠️ Only {len(results)} ESG-relevant chunks found. Skipping topic modeling.")
+        out = {
+            "company": COMPANY_NAME,
+            "filing_date": FILING_DATE,
+            "form_type": FORM_TYPE,
+            "esg_results": results,
+            "topic_model": {}  # empty, but valid
+        }
+        Path(OUTPUT_FILE).parent.mkdir(parents=True, exist_ok=True)
+        Path(OUTPUT_FILE).write_text(json.dumps(out, indent=2), encoding="utf-8")
+        print("💾 Saved →", OUTPUT_FILE)
+        return
 
     print("📊 Running topic modeling …")
     topic_info = {}
     for cat in ESG_KEYWORDS.keys():
         texts = [r["text"] for r in results if cat in r["esg_categories"]]
-        if len(texts) < TOPIC_MIN_CLUSTER:
+        
+        if len(texts) < 5:
+            print(f"⚠️ Skipping topic modeling for {cat} — only {len(texts)} relevant texts.")
             continue
+        
         n_topics = len(texts)
-        n_components = min(5, max(2, n_topics - 1))  # clamp to [2,4] for small data
-        umap_model = UMAP(n_components=n_components, random_state=42)
-        cluster_model = HDBSCAN(min_samples=TOPIC_MIN_SAMPLES, 
-                                min_cluster_size=TOPIC_MIN_CLUSTER)
+        
+        if n_topics <= 3:
+            print(f"⚠️ Skipping topic modeling for {cat} — insufficient samples ({n_topics}).")
+            continue
+        
+        n_components = min(5, max(2, n_topics - 1))
+        n_neighbors = min(10, max(2, n_topics - 2))  
+    
+        umap_model = UMAP(n_components=n_components, n_neighbors=n_neighbors, random_state=42)
+        cluster_model = HDBSCAN(min_samples=TOPIC_MIN_SAMPLES, min_cluster_size=TOPIC_MIN_CLUSTER)
+    
         tm = BERTopic(umap_model=umap_model, hdbscan_model=cluster_model)
-        topics, probs = tm.fit_transform(texts)
-        freq_df = tm.get_topic_freq().rename(columns={"Topic":"topic","Count":"count"})
+        try:
+            topics, probs = tm.fit_transform(texts)
+        except Exception as e:
+            print(f"❌ Failed topic modeling for {cat}: {e}")
+            continue
+        
+        freq_df = tm.get_topic_freq().rename(columns={"Topic": "topic", "Count": "count"})
+        freq_records = freq_df.to_dict(orient="records")
+        terms = tm.get_topics()
+        topic_info[cat] = {"frequencies": freq_records, "terms": terms}
+
+        texts = [r["text"] for r in results if cat in r["esg_categories"]]
+
+        if len(texts) < 5:
+            print(f"⚠️ Skipping topic modeling for {cat} — only {len(texts)} relevant texts.")
+            continue
+
+        n_topics = len(texts)
+        n_components = min(5, max(2, n_topics - 1))
+        if n_topics <= 3:
+            print(f"⚠️ Skipping topic modeling for {cat} — only {n_topics} samples after filtering.")
+            continue
+
+        n_neighbors = min(10, max(2, n_topics - 2))  # safe lower + upper bound
+
+
+        umap_model = UMAP(n_components=n_components, n_neighbors=n_neighbors, random_state=42)
+        cluster_model = HDBSCAN(min_samples=TOPIC_MIN_SAMPLES, min_cluster_size=TOPIC_MIN_CLUSTER)
+
+        tm = BERTopic(umap_model=umap_model, hdbscan_model=cluster_model)
+        try:
+            topics, probs = tm.fit_transform(texts)
+        except Exception as e:
+            print(f"❌ Failed topic modeling for {cat}: {e}")
+            continue
+
+        freq_df = tm.get_topic_freq().rename(columns={"Topic": "topic", "Count": "count"})
         freq_records = freq_df.to_dict(orient="records")
         terms = tm.get_topics()
         topic_info[cat] = {"frequencies": freq_records, "terms": terms}

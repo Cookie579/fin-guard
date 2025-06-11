@@ -1,16 +1,21 @@
 import re
 import json
 from pathlib import Path
-from analyze_esg import main as run_analysis  # Assuming main logic is in analyze_esg.py
+from analyze_esg import main as run_analysis  
 
-TEXTS_DIR = Path("texts")
+TEXTS_DIR = Path(__file__).resolve().parent / "texts"
 OUTPUT_DIR = Path("esg-outputs")
 
 def get_txt_files():
-    return list(TEXTS_DIR.rglob("*.txt"))
+    print(f"🔎 Looking in: {TEXTS_DIR.resolve()}")
+    files = list(TEXTS_DIR.rglob("*.txt"))
+    for f in files:
+        print(f"📄 Found file: {f}")
+    return files
+
 
 def parse_metadata(file_path: Path):
-    filename = file_path.stem  # e.g., Apple_Inc.__2014-10-27__10-K
+    filename = file_path.stem  
     try:
         parts = filename.split("__")
         company = parts[0]

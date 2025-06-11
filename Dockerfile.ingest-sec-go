@@ -8,10 +8,10 @@ WORKDIR /app
 COPY ingest-sec-go/go.mod ingest-sec-go/go.sum ./
 RUN go mod download
 
-# Copy the full Go source including companies.json
+# Copy Go source
 COPY ingest-sec-go/ ./
 
-# Build the binary
+# Build the Go binary
 RUN go build -o ingest-sec-go .
 
 # ────────────────────────────────
@@ -20,14 +20,11 @@ RUN go build -o ingest-sec-go .
 FROM alpine:latest
 WORKDIR /root/
 
-# Copy the binary
+# Copy the compiled binary
 COPY --from=builder /app/ingest-sec-go .
 
-# ✅ Copy companies.json into runtime image
+# ✅ Copy companies.json
 COPY --from=builder /app/companies.json .
-
-# Optionally, print contents at startup for debug
-# RUN cat companies.json
 
 # Entrypoint
 ENTRYPOINT ["./ingest-sec-go"]

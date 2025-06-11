@@ -5,15 +5,11 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+
+	"fin-guard/utils"
 )
 
-type Filing struct {
-	CompanyName string `json:"companyName"`
-	FormType    string `json:"formType"`
-	FilingDate  string `json:"filingDate"`
-	Link        string `json:"linkToFilingDetails"`
-}
-
+// Keep this local to this file
 type SECSubmission struct {
 	CIK     string `json:"cik"`
 	Company string `json:"name"`
@@ -28,19 +24,18 @@ type SECSubmission struct {
 }
 
 var allowedForms = map[string]bool{
-	"10-K": true,
-	"10-Q": true,
-	"8-K": true,
+	"10-K":    true,
+	"10-Q":    true,
+	"8-K":     true,
 	"DEF 14A": true,
-	"20-F": true,
-	"40-F": true,
-	"SD": true,
-	"S-1": true,
-	"F-1": true,
+	"20-F":    true,
+	"40-F":    true,
+	"SD":      true,
+	"S-1":     true,
+	"F-1":     true,
 }
 
-// Accepts a Company struct, returns all filings that match allowed forms
-func FetchRecentFilings(company Company) ([]Filing, error) {
+func FetchRecentFilings(company Company) ([]utils.Filing, error) {
 	url := fmt.Sprintf("https://data.sec.gov/submissions/CIK%s.json", company.CIK)
 
 	req, err := http.NewRequest("GET", url, nil)
@@ -66,7 +61,7 @@ func FetchRecentFilings(company Company) ([]Filing, error) {
 		return nil, err
 	}
 
-	var filings []Filing
+	var filings []utils.Filing
 	cikStripped := stripLeadingZeros(company.CIK)
 
 	for i := range submission.Filings.Recent.Form {
@@ -78,7 +73,7 @@ func FetchRecentFilings(company Company) ([]Filing, error) {
 			indexURL := fmt.Sprintf("https://www.sec.gov/Archives/edgar/data/%s/%s/%s-index.htm",
 				cikStripped, accessionNoDashes, accession)
 
-			filings = append(filings, Filing{
+			filings = append(filings, utils.Filing{
 				CompanyName: company.Name,
 				FormType:    formType,
 				FilingDate:  submission.Filings.Recent.FilingDate[i],

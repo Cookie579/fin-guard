@@ -2,15 +2,25 @@ package main
 
 import (
 	"log"
+	"os"
+
+	// "github.com/Cookie579/fin-guard/utils"
+	"fin-guard/utils"
 )
 
 func main() {
 	log.Println("🚀 Starting ingest-sec-go...")
 
-	// Load companies from JSON config
-	companies, err := LoadCompanies("companies.json")
+	// Use env var if provided, otherwise default to /root/companies.json (Docker path)
+	companyPath := os.Getenv("COMPANIES_JSON_PATH")
+	if companyPath == "" {
+		companyPath = "companies.json" // relative path in Docker runtime
+	}
+
+	// Load companies
+	companies, err := LoadCompanies(companyPath)
 	if err != nil {
-		log.Fatalf("❌ Failed to load companies: %v", err)
+		log.Fatalf("❌ Failed to load companies from %s: %v", companyPath, err)
 	}
 
 	for _, company := range companies {
@@ -25,15 +35,13 @@ func main() {
 		log.Printf("📦 %d filings found for %s", len(filings), company.Name)
 
 		for _, filing := range filings {
-			err := PublishToKinesis(filing)
-			if err != nil {
+			if err := utils.PublishToKinesis(filing); err != nil {
 				log.Printf("❌ Kinesis error: %v", err)
 			} else {
 				log.Printf("✅ Published to Kinesis: %s (%s)", filing.CompanyName, filing.FormType)
 			}
 
-			err = SaveToS3(filing)
-			if err != nil {
+			if err := utils.SaveToS3(filing); err != nil {
 				log.Printf("❌ S3 error: %v", err)
 			} else {
 				log.Printf("✅ Saved to S3: %s (%s)", filing.CompanyName, filing.FormType)
