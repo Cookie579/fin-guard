@@ -1,6 +1,6 @@
-module fin-guard/utils
+module github.com/Cookie579/fin-guard
 
-go 1.21
+go 1.24.4
 
 require github.com/aws/aws-sdk-go v1.55.7
 

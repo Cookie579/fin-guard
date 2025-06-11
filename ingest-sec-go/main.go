@@ -4,8 +4,7 @@ import (
 	"log"
 	"os"
 
-	// "github.com/Cookie579/fin-guard/utils"
-	"fin-guard/utils"
+	"github.com/Cookie579/fin-guard/utils"
 )
 
 func main() {
