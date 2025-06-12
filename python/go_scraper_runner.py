@@ -3,8 +3,7 @@ import subprocess
 def run_go_scraper():
     try:
         result = subprocess.run(
-            ["go", "run", "main.go", "models.go", "google.go", "s3.go", "kinesis.go"],
-            cwd="python/preprocessing-esg",
+            ["go", "run", "preprocessing-esg/main.go", "preprocessing-esg/models.go", "preprocessing-esg/google.go", "preprocessing-esg/s3.go", "preprocessing-esg/kinesis.go"],
             capture_output=True,
             text=True
         )
