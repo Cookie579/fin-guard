@@ -3,10 +3,20 @@ import subprocess
 def run_go_scraper():
     try:
         result = subprocess.run(
-            ["go", "run", "preprocessing-esg/main.go", "preprocessing-esg/models.go", "preprocessing-esg/google.go", "preprocessing-esg/s3.go", "preprocessing-esg/kinesis.go"],
+            [
+                "go", "run",
+                "python/preprocessing-esg/main.go",
+                "python/preprocessing-esg/domain.go",
+                "python/preprocessing-esg/google.go",
+                "python/preprocessing-esg/models.go",
+                "python/preprocessing-esg/s3.go",
+                "python/preprocessing-esg/kinesis.go"
+            ],
+            cwd="/app",  # absolute or relative from FastAPI's perspective
             capture_output=True,
             text=True
         )
+
         print("🌿 ESG Scraper Output:")
         print(result.stdout)
         if result.stderr:
