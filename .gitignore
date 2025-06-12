@@ -34,3 +34,6 @@ __pycache__/
 filing-extractor/texts/
 filing-extractor/filing-jsons/
 filing-extractor/esg-outputs/
+
+# --- Ingest-ESG-GO Output ---
+ingest-esg-go/esg-content
