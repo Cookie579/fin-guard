@@ -1,14 +1,12 @@
-package discovery
+package main
 
 import (
 	"fmt"
 	"net/url"
-
-	"github.com/Cookie579/fin-guard/config"
 )
 
 // FindDomain attempts to find the main website domain using Google Search
-func FindDomain(companyName string, cfg config.Config) (string, error) {
+func FindDomain(companyName string, cfg *Config) (string, error) {
 	query := fmt.Sprintf("%s official site", companyName)
 	results, err := GoogleSearch(query, cfg)
 	if err != nil {

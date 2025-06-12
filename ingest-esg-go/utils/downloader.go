@@ -10,28 +10,20 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
-
-	"github.com/Cookie579/fin-guard/ingest-esg-go/discovery"
 )
 
-// DownloadAllESGContent loads from existing JSON and downloads files
-func DownloadAllESGContent(ticker string) error {
-	// Step 1: Check if results JSON exists
-	resultPath := filepath.Join("esg-results", fmt.Sprintf("%s_esg.json", ticker))
-	file, err := os.Open(resultPath)
-	if err != nil {
-		fmt.Printf("⚠️  No saved ESG results for %s — skipping download.\n", ticker)
-		return nil
-	}
-	defer file.Close()
+type SearchItem struct {
+	Title       string `json:"title"`
+	Link        string `json:"link"`
+	DisplayLink string `json:"displayLink"`
+}
 
-	var items []discovery.GoogleSearchItem
-	if err := json.NewDecoder(file).Decode(&items); err != nil {
-		fmt.Printf("❌ Failed to parse results for %s: %v\n", ticker, err)
-		return err
+func DownloadFromJSON(ticker string, data []byte) error {
+	var items []SearchItem
+	if err := json.Unmarshal(data, &items); err != nil {
+		return fmt.Errorf("failed to parse JSON: %w", err)
 	}
 
-	// Step 2: Prepare download folder
 	outputDir := filepath.Join("esg-content", ticker)
 	if err := os.MkdirAll(outputDir, os.ModePerm); err != nil {
 		return err
@@ -39,7 +31,6 @@ func DownloadAllESGContent(ticker string) error {
 
 	usedNames := make(map[string]int)
 
-	// Step 3: Download each link
 	for idx, item := range items {
 		resp, err := http.Get(item.Link)
 		if err != nil {
@@ -48,15 +39,10 @@ func DownloadAllESGContent(ticker string) error {
 		}
 		defer resp.Body.Close()
 
-		// Try to extract filename from URL
-		parsedURL, err := url.Parse(item.Link)
-		filename := ""
-		if err == nil {
-			filename = path.Base(parsedURL.Path)
-			filename = strings.Split(filename, "?")[0] // remove query params
-		}
+		parsedURL, _ := url.Parse(item.Link)
+		filename := path.Base(parsedURL.Path)
+		filename = strings.Split(filename, "?")[0]
 
-		// Fallback filename
 		if filename == "" || !strings.Contains(filename, ".") {
 			ext := ".html"
 			if strings.Contains(strings.ToLower(item.Link), ".pdf") {
@@ -65,7 +51,6 @@ func DownloadAllESGContent(ticker string) error {
 			filename = fmt.Sprintf("esg_%02d%s", idx+1, ext)
 		}
 
-		// Handle duplicates
 		cleanName := filename
 		if count, exists := usedNames[filename]; exists {
 			count++

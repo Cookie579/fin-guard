@@ -7,6 +7,7 @@ import (
 	"os"
 )
 
+// Loaders
 func LoadCompanies(path string) ([]Company, error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -64,6 +65,35 @@ func main() {
 		}
 
 		log.Printf("✅ Done with %s", company.Ticker)
+	}
+
+	// === Domain Mapping Section ===
+	const domainKey = "Company_Domain_Links/company_domains.json"
+	domainExists, err := CheckIfExists("fin-processed-esg-reports", domainKey)
+	if err != nil {
+		log.Printf("❌ Could not check if domain map exists: %v", err)
+	}
+
+	if !domainExists {
+		log.Println("🌐 Domain mapping file not found. Generating...")
+
+		domainMap := make(map[string]string)
+		for _, company := range companies {
+			domain, err := FindDomain(company.Name, cfg)
+			if err != nil {
+				log.Printf("❌ Failed to find domain for %s: %v", company.Name, err)
+				continue
+			}
+			domainMap[company.Name] = domain
+		}
+
+		if err := SaveDomainMap("fin-processed-esg-reports", domainKey, domainMap); err != nil {
+			log.Printf("❌ Failed to save domain map to S3: %v", err)
+		} else {
+			log.Printf("✅ Domain map uploaded to s3://%s/%s", "fin-processed-esg-reports", domainKey)
+		}
+	} else {
+		log.Println("📁 Domain mapping file already exists — skipping.")
 	}
 
 	log.Println("✅ Preprocessing ESG scraping completed.")

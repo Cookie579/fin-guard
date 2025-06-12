@@ -1,4 +1,4 @@
-package discovery
+package main
 
 import (
 	"encoding/json"
@@ -6,8 +6,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-
-	"github.com/Cookie579/fin-guard/config"
 )
 
 // GoogleSearchItem represents one search result
@@ -23,14 +21,14 @@ type GoogleSearchResponse struct {
 }
 
 // GoogleSearch performs a search using Google Custom Search API
-func GoogleSearch(query string, cfg config.Config) (*GoogleSearchResponse, error) {
+func GoogleSearch(query string, cfg *Config) (*GoogleSearchResponse, error) {
 	encodedQuery := url.QueryEscape(query)
 
 	apiURL := fmt.Sprintf(
 		"https://www.googleapis.com/customsearch/v1?q=%s&key=%s&cx=%s",
 		encodedQuery,
 		cfg.GoogleAPIKey,
-		cfg.GoogleCX,
+		cfg.GoogleSearchCX,
 	)
 
 	resp, err := http.Get(apiURL)
