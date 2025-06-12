@@ -12,7 +12,9 @@ import (
 )
 
 func CheckIfExists(bucket, key string) (bool, error) {
-	sess := session.Must(session.NewSession())
+	sess := session.Must(session.NewSession(&aws.Config{
+		Region: aws.String("us-east-1"), // ✅ add region here
+	}))
 	svc := s3.New(sess)
 
 	_, err := svc.HeadObject(&s3.HeadObjectInput{
@@ -30,7 +32,10 @@ func CheckIfExists(bucket, key string) (bool, error) {
 }
 
 func SaveResults(bucket, key string, results []SearchItem) error {
-	sess := session.Must(session.NewSession())
+	sess := session.Must(session.NewSession(&aws.Config{
+		Region: aws.String("us-east-1"), // <-- Make sure this is set!
+	}))
+
 	svc := s3.New(sess)
 
 	data, err := json.Marshal(results)
