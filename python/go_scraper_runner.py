@@ -6,6 +6,7 @@ def run_go_scraper():
             [
                 "go", "run",
                 "python/preprocessing-esg/main.go",
+                "python/preprocessing-esg/Domain_Search.go",
                 "python/preprocessing-esg/domain.go",
                 "python/preprocessing-esg/google.go",
                 "python/preprocessing-esg/models.go",
