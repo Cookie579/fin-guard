@@ -1,26 +1,34 @@
+# Base image with Python
 FROM python:3.12-slim
 
-# Set environment variables to reduce interactive prompts
+# Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
 # Set working directory
 WORKDIR /app
 
+# Install dependencies: pip + Go + system tools
+RUN apt-get update && \
+    apt-get install -y golang git build-essential && \
+    rm -rf /var/lib/apt/lists/*
+
 # Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Go
-RUN apt-get update && apt-get install -y golang git && \
-    rm -rf /var/lib/apt/lists/*
+# --- Build the Go ESG scraper binary ---
+COPY python/preprocessing-esg /build/preprocessing-esg
+WORKDIR /build/preprocessing-esg
+RUN go build -o /usr/local/bin/esg-scraper
 
-# Copy Python and Go source files
+# --- Copy the rest of the Python code ---
+WORKDIR /app
 COPY python/ ./python/
-COPY . .
+COPY config.json ./config.json  
 
-# Set the working directory to where your FastAPI app lives
+# Set working directory for FastAPI app
 WORKDIR /app/python
 
-# Run FastAPI app
+# Entry point: run FastAPI app
 CMD ["uvicorn", "preprocess_kinesis:app", "--host", "0.0.0.0", "--port", "8080"]
