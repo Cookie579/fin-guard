@@ -17,3 +17,13 @@ serviceAccount:
   roleArn: arn:aws:iam::084071638445:role/preprocess-irsa-role
 
 resources: {}
+
+extraVolumes:
+  - name: config-volume
+    secret:
+      secretName: preprocess-config
+
+extraVolumeMounts:
+  - name: config-volume
+    mountPath: /app/config.json
+    subPath: config.json
