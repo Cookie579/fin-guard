@@ -15,18 +15,22 @@ def process_kinesis_stream():
     client = boto3.client("kinesis", region_name=REGION)
 
     try:
-        response = client.describe_stream(StreamName=STREAM_NAME)
-        shard_id = response["StreamDescription"]["Shards"][0]["ShardId"]
+        stream_desc = client.describe_stream(StreamName=STREAM_NAME)
+        shard_id = stream_desc["StreamDescription"]["Shards"][0]["ShardId"]
 
         shard_iterator_response = client.get_shard_iterator(
             StreamName=STREAM_NAME,
             ShardId=shard_id,
             ShardIteratorType="LATEST"
         )
-        shard_iterator = shard_iterator_response["ShardIterator"]
+        shard_iterator = shard_iterator_response.get("ShardIterator")
+
+        if not shard_iterator:
+            print("❌ Failed to get initial shard iterator.")
+            return
 
     except ClientError as e:
-        print(f"❌ Failed to get shard iterator: {e}")
+        print(f"❌ Error initializing Kinesis stream: {e}")
         return
 
     while True:
@@ -46,18 +50,17 @@ def process_kinesis_stream():
                 }
                 upload_to_s3(payload)
 
-            # Get the next iterator, exit if not present
             shard_iterator = response.get("NextShardIterator")
             if not shard_iterator:
-                print("⚠️ No NextShardIterator. Stream might be closed.")
+                print("⚠️ No NextShardIterator returned. Shard may be closed or expired.")
                 break
 
-            # Delay to avoid rate limiting
             time.sleep(1)
 
         except client.exceptions.ProvisionedThroughputExceededException:
-            print("⚠️ Throughput exceeded, backing off...")
+            print("⚠️ Throughput exceeded. Retrying after delay...")
             time.sleep(2)
+
         except Exception as e:
-            print(f"❌ Error while processing stream: {e}")
+            print(f"❌ Unexpected error: {e}")
             time.sleep(2)
