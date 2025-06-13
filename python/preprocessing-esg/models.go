@@ -13,7 +13,7 @@ type Company struct {
 
 type Config struct {
 	GoogleAPIKey   string `json:"google_api_key"`
-	GoogleSearchCX string `json:"google_search_cx"`
+	GoogleSearchCX string `json:"google_cx"`
 	KinesisStream  string
 	AWSRegion      string
 }

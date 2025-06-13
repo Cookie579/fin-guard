@@ -31,6 +31,8 @@ func GoogleSearch(query string, cfg *Config) (*GoogleSearchResponse, error) {
 		cfg.GoogleSearchCX,
 	)
 
+	fmt.Println("🔍 Final Google Search URL:", apiURL)
+
 	resp, err := http.Get(apiURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to call Google Search API: %w", err)
