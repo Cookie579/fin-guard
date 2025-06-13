@@ -3,10 +3,19 @@ import subprocess
 def run_go_scraper():
     try:
         result = subprocess.run(
-            ["esg-scraper"],  # ✅ Just run the binary
+            [
+                "go", "run",
+                "python/preprocessing-esg/main.go",
+                "python/preprocessing-esg/domain_search.go",
+                "python/preprocessing-esg/domain.go",
+                "python/preprocessing-esg/google.go",
+                "python/preprocessing-esg/models.go",
+                "python/preprocessing-esg/s3.go",
+                "python/preprocessing-esg/kinesis.go"
+            ],
+            cwd="/app",  # absolute or relative from FastAPI's perspective
             capture_output=True,
-            text=True,
-            cwd="/app"  # Optional: wherever you want the command to run
+            text=True
         )
 
         print("🌿 ESG Scraper Output:")
