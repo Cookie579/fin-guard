@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 )
 
@@ -18,14 +19,32 @@ type Config struct {
 	AWSRegion      string
 }
 
-func LoadConfig(path string) (*Config, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
+func LoadConfig() (*Config, error) {
+	paths := []string{
+		"/app/config.json", // for K8s
+		"config.json",      // for local
+		"../config.json",   // fallback for dev
 	}
-	defer f.Close()
+
+	var file *os.File
+	var err error
+
+	for _, path := range paths {
+		file, err = os.Open(path)
+		if err == nil {
+			fmt.Printf("✅ Loaded config from %s\n", path)
+			break
+		}
+	}
+	if file == nil {
+		return nil, fmt.Errorf("❌ Could not find config.json in known locations")
+	}
+	defer file.Close()
 
 	var cfg Config
-	err = json.NewDecoder(f).Decode(&cfg)
-	return &cfg, err
+	if err := json.NewDecoder(file).Decode(&cfg); err != nil {
+		return nil, fmt.Errorf("❌ Failed to parse config.json: %w", err)
+	}
+
+	return &cfg, nil
 }

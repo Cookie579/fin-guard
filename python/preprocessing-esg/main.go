@@ -30,7 +30,12 @@ func main() {
 		log.Fatalf("❌ Failed to load companies.json: %v", err)
 	}
 
-	cfg, err := LoadConfig("config.json")
+	// for local testing: cfg, err := LoadConfig("config.json")
+	cfg, err := LoadConfig()
+	if err != nil {
+		log.Fatalf("❌ Failed to load config: %v", err)
+	}
+
 	if err != nil {
 		log.Fatalf("❌ Failed to load config: %v", err)
 	}
