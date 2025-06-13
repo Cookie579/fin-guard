@@ -25,7 +25,6 @@ RUN go build -o /usr/local/bin/esg-scraper
 # --- Copy the rest of the Python code ---
 WORKDIR /app
 COPY python/ ./python/
-COPY config.json ./config.json  
 
 # Set working directory for FastAPI app
 WORKDIR /app/python
