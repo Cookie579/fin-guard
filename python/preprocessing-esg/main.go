@@ -25,7 +25,7 @@ func LoadCompanies(path string) ([]Company, error) {
 func main() {
 	log.Println("🌱 Starting ESG scraper preprocessor...")
 
-	companies, err := LoadCompanies("../../companies.json")
+	companies, err := LoadCompanies("companies.json")
 	if err != nil {
 		log.Fatalf("❌ Failed to load companies.json: %v", err)
 	}
