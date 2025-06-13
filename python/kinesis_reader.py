@@ -1,5 +1,6 @@
-# kinesis_reader.py
-import boto3, json, time
+import boto3
+import json
+import time
 from langdetect import detect
 from botocore.exceptions import ClientError
 from s3_uploader import upload_to_s3
@@ -15,9 +16,9 @@ def process_kinesis_stream():
 
     # ---- 1. Get first shard iterator ----
     try:
-        desc  = client.describe_stream(StreamName=STREAM_NAME)
+        desc = client.describe_stream(StreamName=STREAM_NAME)
         shard_id = desc["StreamDescription"]["Shards"][0]["ShardId"]
-        itr_rsp  = client.get_shard_iterator(
+        itr_rsp = client.get_shard_iterator(
             StreamName=STREAM_NAME,
             ShardId=shard_id,
             ShardIteratorType="LATEST"
@@ -30,33 +31,57 @@ def process_kinesis_stream():
         print(f"❌ Kinesis init error: {e}")
         return
 
+    print("🔁 Started processing Kinesis stream...")
+
     # ---- 2. Poll loop ----
     while True:
         try:
             rsp = client.get_records(ShardIterator=shard_itr, Limit=10)
-            for rec in rsp.get("Records", []):
-                payload_raw = json.loads(rec["Data"])
-                cleaned = clean_text(payload_raw.get("text", ""))
-                lang    = detect(cleaned)
+            records = rsp.get("Records", [])
 
-                upload_to_s3({
-                    "company":    payload_raw.get("company"),
-                    "filing_id":  payload_raw.get("filing_id"),
-                    "language":   lang,
+            if not records:
+                print("ℹ️ No new records. Waiting...")
+                time.sleep(1)
+
+            for rec in records:
+                try:
+                    payload_raw = json.loads(rec["Data"])
+                except json.JSONDecodeError as e:
+                    print(f"⚠️ Failed to parse record JSON: {e}")
+                    continue
+
+                text_raw = payload_raw.get("text", "")
+                if not text_raw:
+                    print(f"⚠️ Skipped record without 'text': {payload_raw}")
+                    continue
+
+                try:
+                    cleaned = clean_text(text_raw)
+                    lang = detect(cleaned)
+                except Exception as e:
+                    print(f"⚠️ Failed to clean or detect language: {e}")
+                    continue
+
+                payload = {
+                    "company": payload_raw.get("company") or payload_raw.get("companyName", "unknown"),
+                    "filing_id": payload_raw.get("filing_id", "unknown"),
+                    "language": lang,
                     "cleaned_text": cleaned,
-                })
+                }
+
+                upload_to_s3(payload)
 
             shard_itr = rsp.get("NextShardIterator")
             if not shard_itr:
-                print("⚠️   No NextShardIterator returned - exiting reader")
+                print("⚠️ No NextShardIterator returned – exiting reader")
                 break
 
-            time.sleep(1)     # stay under 5 gets/sec shard-limit
+            time.sleep(1)  # avoid throttling
 
         except client.exceptions.ProvisionedThroughputExceededException:
-            print("⚠️   Throttled - backing off 2 s")
+            print("⚠️ Throttled – retrying in 2 seconds")
             time.sleep(2)
 
         except Exception as e:
-            print(f"❌ Stream processing error: {e}")
+            print(f"❌ Unexpected stream processing error: {e}")
             time.sleep(2)
