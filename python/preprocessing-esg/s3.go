@@ -72,3 +72,22 @@ func SaveDomainMap(bucket, key string, data map[string]string) error {
 	})
 	return err
 }
+
+func SaveDomainEntries(bucket, key string, entries map[string]DomainEntry) error {
+	sess := session.Must(session.NewSession(&aws.Config{
+		Region: aws.String("us-east-1"),
+	}))
+	svc := s3.New(sess)
+
+	jsonData, err := json.Marshal(entries)
+	if err != nil {
+		return err
+	}
+
+	_, err = svc.PutObject(&s3.PutObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+		Body:   bytes.NewReader(jsonData),
+	})
+	return err
+}

@@ -36,10 +36,6 @@ func main() {
 		log.Fatalf("❌ Failed to load config: %v", err)
 	}
 
-	if err != nil {
-		log.Fatalf("❌ Failed to load config: %v", err)
-	}
-
 	for _, company := range companies {
 		key := fmt.Sprintf("scraping-jsons/%s_esg.json", company.Ticker)
 		exists, err := CheckIfExists("fin-processed-esg-reports", key)
@@ -72,7 +68,7 @@ func main() {
 		log.Printf("✅ Done with %s", company.Ticker)
 	}
 
-	// === Domain Mapping Section ===
+	// === Domain Mapping Section (now includes full metadata) ===
 	const domainKey = "Company_Domain_Links/company_domains.json"
 	domainExists, err := CheckIfExists("fin-processed-esg-reports", domainKey)
 	if err != nil {
@@ -82,17 +78,21 @@ func main() {
 	if !domainExists {
 		log.Println("🌐 Domain mapping file not found. Generating...")
 
-		domainMap := make(map[string]string)
+		domainMap := make(map[string]DomainEntry)
 		for _, company := range companies {
 			domain, err := FindDomain(company.Name, cfg)
 			if err != nil {
 				log.Printf("❌ Failed to find domain for %s: %v", company.Name, err)
 				continue
 			}
-			domainMap[company.Name] = domain
+			domainMap[company.Name] = DomainEntry{
+				Name:   company.Name,
+				Ticker: company.Ticker,
+				Domain: domain,
+			}
 		}
 
-		if err := SaveDomainMap("fin-processed-esg-reports", domainKey, domainMap); err != nil {
+		if err := SaveDomainEntries("fin-processed-esg-reports", domainKey, domainMap); err != nil {
 			log.Printf("❌ Failed to save domain map to S3: %v", err)
 		} else {
 			log.Printf("✅ Domain map uploaded to s3://%s/%s", "fin-processed-esg-reports", domainKey)

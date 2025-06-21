@@ -12,6 +12,12 @@ type Company struct {
 	CIK    string `json:"cik"`
 }
 
+type DomainEntry struct {
+	Name   string `json:"name"`
+	Ticker string `json:"ticker"`
+	Domain string `json:"domain"`
+}
+
 type Config struct {
 	GoogleAPIKey   string `json:"google_api_key"`
 	GoogleSearchCX string `json:"google_cx"`
