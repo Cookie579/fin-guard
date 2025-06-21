@@ -1,0 +1,24 @@
+image:
+  repository: ghcr.io/cookie579/ingest-esg-go
+  tag: "0.2.0"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 80
+
+aws:
+  region: us-east-1
+  outputBucket: fin-processed-esg-reports
+
+resources:
+  limits:
+    cpu: 250m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 256Mi
+
+serviceAccount:
+  create: true
+  name: fin-guard-sa

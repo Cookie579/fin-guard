@@ -1,20 +1,24 @@
+# dockerfile.ingest-esg-go
+
 FROM golang:1.22-alpine AS builder
 WORKDIR /app
-
 COPY go.mod go.sum ./
 RUN go mod download
-
 COPY . .
-
 WORKDIR /app/ingest-esg-go
 RUN go build -o ingest-esg-go .
 
-FROM alpine:latest
-WORKDIR /root/
+FROM python:3.12-slim
+WORKDIR /app
 
+# Copy FastAPI wrapper
+COPY ingest-esg-go/trigger.py .
+
+# Copy compiled Go binary
 COPY --from=builder /app/ingest-esg-go/ingest-esg-go .
-COPY companies.json .
-COPY config.json .
 
+# Install FastAPI
+RUN pip install fastapi uvicorn boto3
 
-ENTRYPOINT ["./ingest-esg-go"]
+EXPOSE 8080
+CMD ["uvicorn", "trigger:app", "--host", "0.0.0.0", "--port", "8080"]

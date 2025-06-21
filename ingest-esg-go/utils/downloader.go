@@ -1,15 +1,17 @@
 package utils
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"io"
+	"mime"
 	"net/http"
 	"net/url"
-	"os"
 	"path"
 	"path/filepath"
 	"strings"
+
+	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 )
 
 type SearchItem struct {
@@ -18,15 +20,10 @@ type SearchItem struct {
 	DisplayLink string `json:"displayLink"`
 }
 
-func DownloadFromJSON(ticker string, data []byte) error {
+func DownloadFromJSON(ticker string, data []byte, uploader *s3manager.Uploader, bucket string) error {
 	var items []SearchItem
 	if err := json.Unmarshal(data, &items); err != nil {
 		return fmt.Errorf("failed to parse JSON: %w", err)
-	}
-
-	outputDir := filepath.Join("esg-content", ticker)
-	if err := os.MkdirAll(outputDir, os.ModePerm); err != nil {
-		return err
 	}
 
 	usedNames := make(map[string]int)
@@ -62,21 +59,20 @@ func DownloadFromJSON(ticker string, data []byte) error {
 			usedNames[filename] = 0
 		}
 
-		filePath := filepath.Join(outputDir, cleanName)
-		out, err := os.Create(filePath)
-		if err != nil {
-			fmt.Printf("❌ Failed to create file: %v\n", err)
-			continue
-		}
-		defer out.Close()
+		key := BuildS3Key(ticker, cleanName)
 
-		_, err = io.Copy(out, resp.Body)
-		if err != nil {
-			fmt.Printf("❌ Failed to write content: %v\n", err)
-			continue
+		contentType := resp.Header.Get("Content-Type")
+		if contentType == "" {
+			contentType = mime.TypeByExtension(filepath.Ext(cleanName))
 		}
 
-		fmt.Printf("✅ Downloaded: %s\n", filePath)
+		err = UploadToS3(context.Background(), uploader, bucket, key, resp.Body, contentType)
+		if err != nil {
+			fmt.Printf("❌ Failed to upload to S3: %v\n", err)
+			continue
+		}
+
+		fmt.Printf("✅ Uploaded to s3://%s/%s\n", bucket, key)
 	}
 
 	return nil

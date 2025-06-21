@@ -4,51 +4,50 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
 
 	"github.com/Cookie579/fin-guard/ingest-esg-go/utils"
 )
 
-func LoadCompanies(path string) ([]utils.Company, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	var data struct {
-		Companies []utils.Company `json:"companies"`
-	}
-	err = json.NewDecoder(file).Decode(&data)
-	return data.Companies, err
+type DomainEntry struct {
+	Name   string `json:"name"`
+	Ticker string `json:"ticker"`
+	Domain string `json:"domain"`
 }
 
 func main() {
-	log.Println("🌱 Starting ingest-esg-go...")
-
-	companies, err := LoadCompanies("../companies.json")
-	if err != nil {
-		log.Fatalf("❌ Failed to load companies: %v", err)
-	}
+	log.Println("🌱 Starting ESG ingest from company_domains.json...")
 
 	bucket := "fin-processed-esg-reports"
+	prefix := "Company_Domain_Links/company_domains.json"
+	outBucket := "fin-processed-esg-reports"
 
-	for _, company := range companies {
-		key := fmt.Sprintf("scraping-jsons/%s_esg.json", company.Ticker)
-		log.Printf("🔍 Checking for: %s in S3", key)
+	jsonBytes, err := utils.LoadJSONFromS3(bucket, prefix)
+	if err != nil {
+		log.Fatalf("❌ Failed to load company_domains.json: %v", err)
+	}
 
-		jsonBytes, err := utils.LoadJSONFromS3(bucket, key)
+	var domains []DomainEntry
+	if err := json.Unmarshal(jsonBytes, &domains); err != nil {
+		log.Fatalf("❌ JSON unmarshal error: %v", err)
+	}
+
+	uploader := utils.NewS3Uploader("us-east-1")
+
+	for _, entry := range domains {
+		key := fmt.Sprintf("scraping-jsons/%s_esg.json", entry.Ticker)
+		log.Printf("🔍 Fetching scraped ESG results for: %s", entry.Ticker)
+
+		jsonData, err := utils.LoadJSONFromS3(bucket, key)
 		if err != nil {
-			log.Printf("❌ Could not load ESG JSON for %s: %v", company.Ticker, err)
+			log.Printf("❌ Could not load ESG JSON for %s: %v", entry.Ticker, err)
 			continue
 		}
 
-		log.Printf("📥 Found ESG JSON for %s — starting download", company.Ticker)
-
-		if err := utils.DownloadFromJSON(company.Ticker, jsonBytes); err != nil {
-			log.Printf("❌ Download failed for %s: %v", company.Ticker, err)
+		log.Printf("📥 Found ESG JSON for %s — processing...", entry.Ticker)
+		if err := utils.DownloadFromJSON(entry.Ticker, jsonData, uploader, outBucket); err != nil {
+			log.Printf("❌ Download failed for %s: %v", entry.Ticker, err)
 		}
 	}
 
-	log.Println("✅ ingest-esg-go completed.")
+	log.Println("✅ ESG ingest complete.")
 }
