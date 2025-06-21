@@ -1,0 +1,31 @@
+name: Build & Push ESG Analyzer
+
+on:
+  push:
+    paths:
+      - "Dockerfile"
+      - "requirements.txt"
+      - ".github/workflows/esg-analyzer.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_PAT }}
+      - uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: |
+            ghcr.io/cookie579/esg-analyzer:latest
+            ghcr.io/cookie579/esg-analyzer:${{ github.sha }}
+            ghcr.io/cookie579/esg-analyzer:${{ github.ref_name }}

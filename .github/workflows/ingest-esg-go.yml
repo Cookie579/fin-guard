@@ -1,0 +1,31 @@
+name: Build & Push Ingest ESG Go
+
+on:
+  push:
+    paths:
+      - "ingest-esg-go/**"
+      - "Dockerfile.ingest-esg-go"
+      - ".github/workflows/ingest-esg-go.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_PAT }}
+      - uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.ingest-esg-go
+          push: true
+          tags: |
+            ghcr.io/cookie579/ingest-esg-go:latest
+            ghcr.io/cookie579/ingest-esg-go:${{ github.sha }}
+            ghcr.io/cookie579/ingest-esg-go:${{ github.ref_name }}

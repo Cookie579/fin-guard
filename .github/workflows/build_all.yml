@@ -1,0 +1,19 @@
+name: Build All Images (Essential Changes)
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+    paths:
+      - "Dockerfile"
+      - "requirements.txt"
+      - ".github/workflows/build-all.yml"
+
+jobs:
+  trigger-all:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 🧠 Reminder
+        run: |
+          echo "This job triggers on shared files only."
+          echo "All individual Docker workflows will also trigger via their own scoped paths."
