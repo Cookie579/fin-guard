@@ -29,13 +29,6 @@ func DownloadFromJSON(ticker string, data []byte, uploader *s3manager.Uploader, 
 	usedNames := make(map[string]int)
 
 	for idx, item := range items {
-		resp, err := http.Get(item.Link)
-		if err != nil {
-			fmt.Printf("❌ Failed to download %s: %v\n", item.Link, err)
-			continue
-		}
-		defer resp.Body.Close()
-
 		parsedURL, _ := url.Parse(item.Link)
 		filename := path.Base(parsedURL.Path)
 		filename = strings.Split(filename, "?")[0]
@@ -60,6 +53,24 @@ func DownloadFromJSON(ticker string, data []byte, uploader *s3manager.Uploader, 
 		}
 
 		key := BuildS3Key(ticker, cleanName)
+
+		// Check if file already exists in S3
+		exists, err := FileExistsInS3(bucket, key)
+		if err != nil {
+			fmt.Printf("❌ Failed to check S3 for %s: %v\n", key, err)
+			continue
+		}
+		if exists {
+			fmt.Printf("📁 Skipping already existing file: s3://%s/%s\n", bucket, key)
+			continue
+		}
+
+		resp, err := http.Get(item.Link)
+		if err != nil {
+			fmt.Printf("❌ Failed to download %s: %v\n", item.Link, err)
+			continue
+		}
+		defer resp.Body.Close()
 
 		contentType := resp.Header.Get("Content-Type")
 		if contentType == "" {
