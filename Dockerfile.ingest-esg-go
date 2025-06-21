@@ -1,24 +1,50 @@
-# dockerfile.ingest-esg-go
-
+# ──────────────────────────────
+# 1) Build stage – compile Go
+# ──────────────────────────────
 FROM golang:1.24-alpine AS builder
-WORKDIR /app
+
+WORKDIR /src
+
+# download Go modules first (better layer-caching)
 COPY go.mod go.sum ./
 RUN go mod download
-COPY . .
-WORKDIR /app/ingest-esg-go
-RUN go build -o ingest-esg-go .
 
+# copy the full source and build
+COPY . .
+WORKDIR /src/ingest-esg-go
+# produce a static Linux binary
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o ingest-esg-go .
+
+# ──────────────────────────────
+# 2) Runtime stage – slim Python
+# ──────────────────────────────
 FROM python:3.12-slim
+
+# ---- minimal OS packages pdfplumber needs ----
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends gcc libjpeg-turbo-progs && \
+    rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
-# Copy FastAPI wrapper
+# copy FastAPI trigger
 COPY ingest-esg-go/trigger.py .
 
-# Copy compiled Go binary
-COPY --from=builder /app/ingest-esg-go/ingest-esg-go .
+# copy compiled Go binary
+COPY --from=builder /src/ingest-esg-go/ingest-esg-go .
 
-# Install FastAPI
-RUN pip install fastapi uvicorn boto3
+# copy the extractor + helper utils
+COPY ingest-esg-go/utils ./utils
 
+# ---- Python deps ----
+RUN pip install --no-cache-dir \
+        fastapi uvicorn boto3 \
+        pdfplumber beautifulsoup4 lxml
+
+# if you want pdfplumber quieter, drop pdfminer.six’s logging
+# RUN pip install --no-cache-dir pdfminer.six
+
+# expose FastAPI
 EXPOSE 8080
+
 CMD ["uvicorn", "trigger:app", "--host", "0.0.0.0", "--port", "8080"]
