@@ -21,16 +21,24 @@ func main() {
 	prefix := "Company_Domain_Links/company_domains.json"
 	outBucket := "fin-processed-esg-reports"
 
+	// Load JSON from S3
 	jsonBytes, err := utils.LoadJSONFromS3(bucket, prefix)
 	if err != nil {
 		log.Fatalf("❌ Failed to load company_domains.json: %v", err)
 	}
 
-	var domains []DomainEntry
-	if err := json.Unmarshal(jsonBytes, &domains); err != nil {
+	// Unmarshal into map, then flatten to slice
+	var domainMap map[string]DomainEntry
+	if err := json.Unmarshal(jsonBytes, &domainMap); err != nil {
 		log.Fatalf("❌ JSON unmarshal error: %v", err)
 	}
 
+	var domains []DomainEntry
+	for _, entry := range domainMap {
+		domains = append(domains, entry)
+	}
+
+	// S3 uploader
 	uploader := utils.NewS3Uploader("us-east-1")
 
 	for _, entry := range domains {
