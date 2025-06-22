@@ -64,7 +64,7 @@ func DownloadFromJSON(ticker string, data []byte, uploader *s3manager.Uploader, 
 		defer resp.Body.Close()
 
 		// Save file locally
-		localDir := filepath.Join("ingest-esg-go", "esg-content", ticker)
+		localDir := filepath.Join("esg-content", ticker)
 		if err := os.MkdirAll(localDir, os.ModePerm); err != nil {
 			fmt.Printf("❌ Failed to create local dir: %v\n", err)
 			continue
