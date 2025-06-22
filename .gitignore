@@ -40,3 +40,5 @@ ingest-esg-go/esg-content
 
 ingest-esg-go/ingest-esg-go
 eksctl/
+
+k8s/argocd/repo-creds.yaml

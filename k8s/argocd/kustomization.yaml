@@ -3,3 +3,5 @@ resources:
   - ingest-esg-go.yaml
   - ingest-sec-go.yaml
   - preprocess-python.yaml
+  - repo-creds.yaml
+  - argocd-cm-patch.yaml
