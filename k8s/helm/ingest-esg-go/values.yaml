@@ -22,3 +22,5 @@ resources:
 serviceAccount:
   create: true
   name: fin-guard-sa
+  roleArn: arn:aws:iam::084071638445:role/ingest-esg-go-irsa-role
+

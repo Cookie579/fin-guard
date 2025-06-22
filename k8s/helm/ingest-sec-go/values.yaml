@@ -5,7 +5,6 @@ image:
   tag: latest
   pullPolicy: Always  
 
-
 imagePullSecrets:
   - name: ghcr-creds
 
@@ -14,3 +13,7 @@ service:
   port: 8080
 
 resources: {}
+
+serviceAccount:
+  name: ingest-sec-go-sa
+  roleArn: arn:aws:iam::084071638445:role/ingest-sec-go-irsa-role

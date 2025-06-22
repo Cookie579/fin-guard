@@ -9,6 +9,9 @@ override.tf
 override.tf.json
 # --- Helm chart values that contain secrets ---
 values/*-secrets.yaml
+k8s/argocd/repo-creds.yaml
+k8s/argocd/ghcr-creds.yaml
+k8s/argocd/preprocess-config.yaml
 
 # --- Other Secrets ---
 config.json
@@ -40,5 +43,3 @@ ingest-esg-go/esg-content
 
 ingest-esg-go/ingest-esg-go
 eksctl/
-
-k8s/argocd/repo-creds.yaml
