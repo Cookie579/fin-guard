@@ -15,6 +15,8 @@ imagePullSecrets:
 serviceAccount:
   name: preprocess-python-sa
   roleArn: arn:aws:iam::084071638445:role/preprocess-irsa-role
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::084071638445:role/preprocess-irsa-role
 
 resources: {}
 
