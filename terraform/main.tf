@@ -52,6 +52,11 @@ module "eks" {
       min_size     = 2 # var.node_group_min_capacity
       max_size     = 4 # var.node_group_max_capacity
       instance_types   = ["t3.small"]
+
+      # 👇 **New — allow the node to use SSM so nodeadm can bootstrap**
+      iam_role_additional_policies = {
+        ssm = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+      }
     }
   }
 
