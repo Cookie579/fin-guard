@@ -8,4 +8,5 @@ type Filing struct {
 	FilingDate string `json:"filingDate"` // “2024-11-01”
 	Accession  string `json:"accession"`  // “0000320193-24-000123”
 	URL        string `json:"url"`        // filing detail page
+	Stage      string `json:"stage"`      // e.g. "raw", "processed"
 }

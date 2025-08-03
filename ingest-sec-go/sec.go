@@ -79,8 +79,9 @@ func FetchRecentFilings(company Company) ([]utils.Filing, error) {
 				Source:     "SEC",                                   // constant
 				Form:       formType,                                // 10-K / 10-Q …
 				FilingDate: submission.Filings.Recent.FilingDate[i], // “2024-11-01”
-				Accession:  accession,                               // already in scope
-				URL:        indexURL,                                // already built
+				Accession:  accession,
+				URL:        indexURL,
+				Stage:      "raw",
 			})
 		}
 	}
