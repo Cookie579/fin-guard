@@ -25,7 +25,7 @@ func PublishToKinesis(filing Filing) error {
 
 	out, err := svc.PutRecord(&kinesis.PutRecordInput{
 		Data:         data,
-		PartitionKey: aws.String(filing.CompanyName),
+		PartitionKey: aws.String(filing.Company),
 		StreamName:   aws.String(streamName),
 	})
 

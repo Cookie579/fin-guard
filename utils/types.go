@@ -1,8 +1,11 @@
 package utils
 
 type Filing struct {
-	CompanyName string `json:"companyName"`
-	FormType    string `json:"formType"`
-	FilingDate  string `json:"filingDate"`
-	Link        string `json:"linkToFilingDetails"`
+	Company    string `json:"company"`    // “Apple Inc.”
+	Ticker     string `json:"ticker"`     // “AAPL”
+	Source     string `json:"source"`     // “SEC”
+	Form       string `json:"form"`       // “10-K”
+	FilingDate string `json:"filingDate"` // “2024-11-01”
+	Accession  string `json:"accession"`  // “0000320193-24-000123”
+	URL        string `json:"url"`        // filing detail page
 }

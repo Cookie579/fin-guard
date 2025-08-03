@@ -74,10 +74,13 @@ func FetchRecentFilings(company Company) ([]utils.Filing, error) {
 				cikStripped, accessionNoDashes, accession)
 
 			filings = append(filings, utils.Filing{
-				CompanyName: company.Name,
-				FormType:    formType,
-				FilingDate:  submission.Filings.Recent.FilingDate[i],
-				Link:        indexURL,
+				Company:    company.Name,                            // from companies.json
+				Ticker:     company.Ticker,                          // from companies.json
+				Source:     "SEC",                                   // constant
+				Form:       formType,                                // 10-K / 10-Q …
+				FilingDate: submission.Filings.Recent.FilingDate[i], // “2024-11-01”
+				Accession:  accession,                               // already in scope
+				URL:        indexURL,                                // already built
 			})
 		}
 	}

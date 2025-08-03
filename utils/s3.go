@@ -26,8 +26,8 @@ func SaveToS3(filing Filing) error {
 	}
 
 	// Sanitize folder and file names
-	company := strings.ReplaceAll(filing.CompanyName, " ", "_")
-	form := strings.ReplaceAll(filing.FormType, "/", "-")
+	company := strings.ReplaceAll(filing.Company, " ", "_")
+	form := strings.ReplaceAll(filing.Form, "/", "-")
 	date := filing.FilingDate
 
 	key := fmt.Sprintf("%s/filing-jsons/%s/%s-%s-%s.json", company, form, company, form, date)

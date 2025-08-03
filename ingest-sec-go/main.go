@@ -37,13 +37,13 @@ func main() {
 			if err := utils.PublishToKinesis(filing); err != nil {
 				log.Printf("❌ Kinesis error: %v", err)
 			} else {
-				log.Printf("✅ Published to Kinesis: %s (%s)", filing.CompanyName, filing.FormType)
+				log.Printf("✅ Published to Kinesis: %s (%s)", filing.Company, filing.Form)
 			}
 
 			if err := utils.SaveToS3(filing); err != nil {
 				log.Printf("❌ S3 error: %v", err)
 			} else {
-				log.Printf("✅ Saved to S3: %s (%s)", filing.CompanyName, filing.FormType)
+				log.Printf("✅ Saved to S3: %s (%s)", filing.Company, filing.Form)
 			}
 		}
 	}
