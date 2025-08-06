@@ -31,29 +31,6 @@ func CheckIfExists(bucket, key string) (bool, error) {
 	return true, nil
 }
 
-func SaveResults(bucket, key string, results []SearchItem) error {
-	sess := session.Must(session.NewSession(&aws.Config{
-		Region: aws.String("us-east-1"), // <-- Make sure this is set!
-	}))
-
-	svc := s3.New(sess)
-
-	data, err := json.Marshal(results)
-	if err != nil {
-		return err
-	}
-
-	_, err = svc.PutObject(&s3.PutObjectInput{
-		Bucket: aws.String(bucket),
-		Key:    aws.String(key),
-		Body:   bytes.NewReader(data),
-	})
-	if err == nil {
-		log.Printf("✅ Saved JSON to s3://%s/%s", bucket, key)
-	}
-	return err
-}
-
 func SaveDomainMap(bucket, key string, data map[string]string) error {
 	sess := session.Must(session.NewSession(&aws.Config{
 		Region: aws.String("us-east-1"),
@@ -105,5 +82,22 @@ func PutDomainToS3(bucket, key string, entry *DomainEntry) error {
 		Key:    aws.String(key),
 		Body:   bytes.NewReader(body),
 	})
+	return err
+}
+
+// PutLinkRecordToS3 saves one ESGLinkRecord as its own JSON file
+func PutLinkRecordToS3(bucket, key string, rec ESGLinkRecord) error {
+	sess := session.Must(session.NewSession(&aws.Config{Region: aws.String("us-east-1")}))
+	svc := s3.New(sess)
+
+	body, _ := json.Marshal(rec)
+	_, err := svc.PutObject(&s3.PutObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+		Body:   bytes.NewReader(body),
+	})
+	if err == nil {
+		log.Printf("✅ Saved JSON to s3://%s/%s", bucket, key)
+	}
 	return err
 }

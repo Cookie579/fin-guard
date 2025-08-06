@@ -1,10 +1,16 @@
 ############################################################
-# Build a policy = Kinesis READ  +  S3 WRITE
+# Build a policy  =  Kinesis READ
+#                  + S3 WRITE   (fin-processed-filings)
+#                  + S3 R/W/L   (fin-processed-esg-reports)
 ############################################################
 data "aws_iam_policy_document" "preprocess_access" {
+
+  ########################################
+  # 1. Kinesis read-only
+  ########################################
   statement {
-    sid    = "KinesisRead"
-    effect = "Allow"
+    sid     = "KinesisRead"
+    effect  = "Allow"
     actions = [
       "kinesis:DescribeStream",
       "kinesis:Get*",
@@ -13,13 +19,36 @@ data "aws_iam_policy_document" "preprocess_access" {
     resources = [aws_kinesis_stream.ingest.arn]
   }
 
+  ########################################
+  # 2. Write cleaned filings (existing)
+  ########################################
   statement {
-    sid    = "S3Write"
-    effect = "Allow"
-    actions = ["s3:PutObject"]
-    resources = [
-      "${aws_s3_bucket.processed.arn}/*"
+    sid       = "S3WriteFilings"
+    effect    = "Allow"
+    actions   = ["s3:PutObject"]
+    resources = ["${aws_s3_bucket.processed.arn}/*"]
+  }
+
+  ########################################
+  # 3. Domain JSON bucket  (NEW)
+  ########################################
+  # 3-a  List the bucket
+  statement {
+    sid       = "S3DomainList"
+    effect    = "Allow"
+    actions   = ["s3:ListBucket"]
+    resources = [aws_s3_bucket.esg.arn]
+  }
+
+  # 3-b  Read / write objects
+  statement {
+    sid       = "S3DomainReadWrite"
+    effect    = "Allow"
+    actions   = [
+      "s3:GetObject",
+      "s3:PutObject"
     ]
+    resources = ["${aws_s3_bucket.esg.arn}/*"]
   }
 }
 

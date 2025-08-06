@@ -10,12 +10,47 @@
 package main
 
 import (
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"os"
+	"regexp"
+	"strings"
+	"time"
 )
+
+// The single-link payload we’ll store / stream
+type ESGLinkRecord struct {
+	Ticker       string `json:"ticker"`
+	Title        string `json:"title"`
+	URL          string `json:"url"`
+	RetrievedUTC string `json:"retrieved_utc"`
+}
+
+// Clean the title so it’s key-safe and reasonably short
+var badChars = regexp.MustCompile(`[^A-Za-z0-9_-]+`)
+
+func slugify(s string) string {
+	s = strings.TrimSpace(s)
+	s = badChars.ReplaceAllString(s, "_")
+	return strings.Trim(s, "_")
+}
+
+// Deterministic S3 key, e.g.  scraping-jsons/AAPL/Environmental_Progress_Report-f0c2d1e2-2025-08-06.json
+func linkS3Key(company, ticker, title, url string, t time.Time) string {
+	hash := sha1.Sum([]byte(url))
+	return fmt.Sprintf(
+		"scraping-jsons/%s/%s-%s-%s-%04d-%02d-%02d.json",
+		strings.ToUpper(ticker),
+		slugify(company), //  ← NEW  company prefix
+		slugify(title),
+		hex.EncodeToString(hash[:])[:8],
+		t.Year(), int(t.Month()), t.Day(),
+	)
+}
 
 // ── helper to load companies.json ────────────────────────────────
 func LoadCompanies(path string) ([]Company, error) {
@@ -65,29 +100,40 @@ func main() {
 	// ---- 2️⃣ ESG link search & save -----------------------------
 	if *mode == "esg" || *mode == "esg+domain" {
 		for _, c := range companies {
-			key := fmt.Sprintf("scraping-jsons/%s_esg.json", c.Ticker)
-
-			if ok, _ := CheckIfExists("fin-processed-esg-reports", key); ok {
-				log.Printf("📁 %s already on S3 — skip", key)
-				continue
-			}
 
 			log.Printf("🔍 Google ESG search for %s …", c.Name)
-			results, err := SearchESGLinks(c.Name, cfg) // could later add site: filter
+			results, err := SearchESGLinks(c.Name, cfg)
 			if err != nil {
 				log.Printf("❌ search %s: %v", c.Ticker, err)
 				continue
 			}
 
-			if err := SaveResults("fin-processed-esg-reports", key, results); err != nil {
-				log.Printf("❌ S3 put %s: %v", key, err)
-				continue
-			}
-			if err := SendToStream(cfg.KinesisStream, c.Ticker, results); err != nil {
-				log.Printf("❌ Kinesis push %s: %v", c.Ticker, err)
+			for _, item := range results {
+				rec := ESGLinkRecord{
+					Ticker:       c.Ticker,
+					Title:        item.Title,
+					URL:          item.Link,
+					RetrievedUTC: time.Now().UTC().Format(time.RFC3339),
+				}
+
+				key := linkS3Key(c.Name, c.Ticker, item.Title, item.Link, time.Now().UTC())
+
+				// skip if already saved (idempotent runs)
+				if ok, _ := CheckIfExists("fin-processed-esg-reports", key); ok {
+					continue
+				}
+
+				if err := PutLinkRecordToS3("fin-processed-esg-reports", key, rec); err != nil {
+					log.Printf("❌ S3 put %s: %v", key, err)
+					continue
+				}
+
+				if err := SendLinkRecord(cfg.KinesisStream, rec); err != nil {
+					log.Printf("❌ Kinesis push %s: %v", c.Ticker, err)
+				}
 			}
 
-			log.Printf("✅ ESG links stored for %s", c.Ticker)
+			log.Printf("✅ ESG links stored for %s (%d items)", c.Ticker, len(results))
 		}
 	}
 
