@@ -1,18 +1,13 @@
 #!/usr/bin/env python3
 """
-Unified SEC + ESG downloader/processor — **zero hard‑coding edition**
-===================================================================
+Unified SEC + ESG downloader/processor
+=====================================
 
-This script pulls SEC filing JSONs **and** pre‑extracted ESG text files from S3,
-keeps them locally in a consistent folder structure, and re‑uploads cleaned
-SEC texts when needed.
-
-Key features
-------------
-1. **Form‑type consistency** – one sanitised `form_type_safe` everywhere
-2. **Automatic ticker → company mapping** (learned during the SEC pass)
-3. **Robust fallbacks** for ESG (prefix match + filename token match)
-4. **No external lookup files** required; idempotent & rerunnable
+• Pulls SEC filing-JSON manifests (new schema) from S3
+• Calls fetch_filing_text.py to scrape plain text
+• Re-uploads cleaned text using the SAME base-name as the JSON
+  e.g. Apple-10-K-2016-10-26.txt
+• Also downloads ESG text files and keeps local copies
 """
 
 from __future__ import annotations
@@ -20,106 +15,112 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import List, Optional, Tuple
+from datetime import datetime, timezone
+from metadata_io import send_sec_metadata
 
 import boto3
 
-# -----------------------------------------------------------------------------
-# AWS S3 settings
-# -----------------------------------------------------------------------------
+# ─────────────────────────── S3 settings ───────────────────────────
 SEC_BUCKET = "fin-processed-filings"
 ESG_BUCKET = "fin-processed-esg-reports"
-ESG_PREFIX = "texts/"  # within ESG_BUCKET
+ESG_PREFIX = "texts/"           # inside ESG_BUCKET
+KINESIS_STREAM = "fin-guard-stream"
 
-# -----------------------------------------------------------------------------
-# Local paths
-# -----------------------------------------------------------------------------
-BASE_JSON_DIR = Path("filing-jsons")     # SEC JSON cache
-LOCAL_TXT_PATH = Path("temp.txt")        # temp scratch file
-LOCAL_TEXTS_DIR = Path("texts")          # final plain‑text store
+# ───────────────────────── Local paths ─────────────────────────────
+BASE_JSON_DIR  = Path("filing-jsons")   # SEC JSON cache
+LOCAL_TEXTS_DIR = Path("texts")         # cleaned filings + ESG
+LOCAL_TMP_TXT   = Path("temp.txt")      # staging file for upload
 
-# -----------------------------------------------------------------------------
-# Helper utils
-# -----------------------------------------------------------------------------
+FETCH_SCRIPT = Path(__file__).resolve().parent / "fetch_filing_text.py"
 
+# ───────────────────────── Utilities ───────────────────────────────
 def sanitize(name: str) -> str:
-    """Return a filesystem‑safe version of *name*."""
     return name.strip().replace("/", "-").replace(" ", "_")
 
 s3 = boto3.client("s3")
 
-# -----------------------------------------------------------------------------
-# In‑memory ticker → company map (populated on the fly)
-# -----------------------------------------------------------------------------
+# Ticker → company map (learned on the fly)
 TICKER_MAP: dict[str, str] = {}
 
 
 def learn_mapping(ticker: str, company: str) -> None:
-    ticker = ticker.upper().strip()
-    company = sanitize(company)
-    if ticker and ticker not in TICKER_MAP:
-        TICKER_MAP[ticker] = company
-        print(f"🧠  Learned mapping: {ticker} → {company}")
+    t = ticker.upper().strip()
+    c = sanitize(company)
+    if t and t not in TICKER_MAP:
+        TICKER_MAP[t] = c
+        print(f"🧠  Learned mapping: {t} → {c}")
 
 
 def ticker_to_company(ticker: str) -> Optional[str]:
     return TICKER_MAP.get(ticker.upper().strip())
 
-# -----------------------------------------------------------------------------
-# 1️⃣ SEC pipeline
-# -----------------------------------------------------------------------------
-
+# ─────────────────────── SEC helper functions ──────────────────────
 def list_sec_json_keys() -> List[str]:
+    """Return every *original* *.json key under filing-jsons/, skipping -Cleaned copies."""
     keys: List[str] = []
     paginator = s3.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=SEC_BUCKET):
-        for obj in page.get("Contents", []):
-            key = obj["Key"]
-            if key.endswith(".json") and "/filing-jsons/" in key:
-                keys.append(key)
+    for pg in paginator.paginate(Bucket=SEC_BUCKET):
+        for obj in pg.get("Contents", []):
+            k = obj["Key"]
+            if (
+                k.endswith(".json")
+                and "/filing-jsons/" in k
+                and not k.endswith("-Cleaned.json")   # ← skip cleaned
+            ):
+                keys.append(k)
     return keys
 
 
-def download_sec_json(key: str) -> Tuple[Optional[Path], Optional[str], Optional[str]]:
+def download_sec_json(key: str) -> Tuple[Optional[Path], str, str, str]:
+    """
+    Download one JSON manifest, return (local_path, company_folder, form_safe, stem)
+    """
     parts = key.split("/")  # {CompanyFolder}/filing-jsons/{Form}/file.json
     if len(parts) < 4:
         print(f"⚠️  Bad SEC key: {key}")
-        return None, None, None
+        return None, "", "", ""
 
-    folder_company, form_raw = parts[0], parts[2]
-    form_safe = sanitize(form_raw)  # e.g. DEF_14A
-
-    dest_dir = BASE_JSON_DIR / sanitize(folder_company) / form_safe
+    company_folder, form_raw, fname = parts[0], parts[2], parts[-1]
+    form_safe = sanitize(form_raw)
+    dest_dir  = BASE_JSON_DIR / sanitize(company_folder) / form_safe
     dest_dir.mkdir(parents=True, exist_ok=True)
 
-    local_path = dest_dir / Path(key).name
+    local_path = dest_dir / fname
     s3.download_file(SEC_BUCKET, key, str(local_path))
-    return local_path, folder_company, form_safe
+    return local_path, company_folder, form_safe, Path(fname).stem  # stem=base-name
 
 
 def fetch_and_clean_filing(url: str, company: str, date: str, form_safe: str) -> bool:
-    """Call fetch_filing_text.py; if it succeeds, stage the cleaned text."""
+    """
+    Call fetch_filing_text.py (single-file mode).  On success, the scraper
+    writes its output to texts/<Company>/<Form>/<Company>__<Date>__<Form>.txt.
+    We copy that to LOCAL_TMP_TXT for upload.
+    """
     proc = subprocess.run(
-        ["python", "fetch_filing_text.py", url, company, date, form_safe],
+        [sys.executable, str(FETCH_SCRIPT), url, company, date, form_safe],
         capture_output=True, text=True, encoding="utf-8", errors="ignore"
     )
     if proc.returncode != 0:
-        print("❌  scraper error:", proc.stderr.splitlines()[:2])
+        print("❌  scraper error:",
+              *proc.stderr.splitlines()[:4], sep="\n    ")
         return False
 
-    fname = f"{company}__{date}__{form_safe}.txt"
-    scraped = LOCAL_TEXTS_DIR / company / form_safe / fname
-    if scraped.exists():
-        LOCAL_TXT_PATH.write_text(scraped.read_text("utf-8", "replace"), "utf-8")
-        scraped.unlink()
-        return True
-    return False
+    src = (LOCAL_TEXTS_DIR / company / form_safe /
+           f"{company}__{date}__{form_safe}.txt")
+    if not src.exists():
+        return False
+
+    LOCAL_TMP_TXT.write_text(src.read_text("utf-8", "replace"), "utf-8")
+    src.unlink()
+    return True
 
 
-def sec_uploaded(company: str, date: str, form_safe: str) -> bool:
-    key = f"{company}/texts/{form_safe}/{date}.txt"
+def sec_uploaded(company: str, form_safe: str, txt_name: str) -> bool:
+    key = f"{company}/texts/{form_safe}/{txt_name}"
     try:
         s3.head_object(Bucket=SEC_BUCKET, Key=key)
         return True
@@ -127,65 +128,90 @@ def sec_uploaded(company: str, date: str, form_safe: str) -> bool:
         return False
 
 
-def upload_clean_filing(company: str, date: str, form_safe: str) -> None:
-    key = f"{company}/texts/{form_safe}/{date}.txt"
-    s3.upload_file(str(LOCAL_TXT_PATH), SEC_BUCKET, key)
+def upload_clean_filing(local_path: Path, company: str,
+                        form_safe: str, txt_name: str) -> None:
+    key = f"{company}/texts/{form_safe}/{txt_name}"
+    s3.upload_file(str(local_path), SEC_BUCKET, key)
     print(f"✅  Uploaded: s3://{SEC_BUCKET}/{key}")
 
 
 def process_sec_filings() -> None:
     for key in list_sec_json_keys():
         print(f"\n📄  {key}")
-        local_json, folder_company, form_safe = download_sec_json(key)
+        local_json, folder_company, form_safe, stem = download_sec_json(key)
         if not local_json:
             continue
 
-        data = json.loads(local_json.read_text("utf-8", "ignore"))
-        url, date = data.get("linkToFilingDetails"), data.get("filingDate")
+        meta = json.loads(local_json.read_text("utf-8", "ignore"))
+
+        url  = meta.get("url")
+        date = meta.get("filingdate") or meta.get("filingDate")
         if not url or not date:
-            print("⚠️  Missing link/date → skip")
+            print("⚠️  Missing url/date → skip")
             continue
 
-        comp = sanitize(data.get("companyName") or data.get("issuerName") or folder_company)
+        comp = sanitize(meta.get("company") or
+                        meta.get("companyName") or folder_company)
 
-        # learn ticker(s)
+        # Learn tickers
         for fld in ("ticker", "tickers"):
-            val = data.get(fld)
+            val = meta.get(fld)
             if val:
                 items = val if isinstance(val, list) else [val]
                 for t in items:
                     learn_mapping(t, comp)
-        if not any(data.get(fld) for fld in ("ticker", "tickers")):
-            learn_mapping(folder_company, comp)
 
-        if sec_uploaded(comp, date, form_safe):
+        txt_name = f"{stem.replace(' ', '_')}.txt"
+
+        if sec_uploaded(comp, form_safe, txt_name):
             print("✔️  Already uploaded; skip")
             continue
 
         if fetch_and_clean_filing(url, comp, date, form_safe):
-            upload_clean_filing(comp, date, form_safe)
-            LOCAL_TXT_PATH.unlink(missing_ok=True)
-            time.sleep(0.3)
+            upload_clean_filing(LOCAL_TMP_TXT, comp, form_safe, txt_name)
+
+            # ── Build & push metadata record ───────────────────────
+            preview_len = 8192             # 8 KiB
+            
+            with open(LOCAL_TMP_TXT, "rb") as fh:
+                snippet = fh.read(preview_len).decode("utf-8", "replace")
+                
+            rec = {
+                "company":     comp,
+                "ticker":      meta.get("ticker")
+                                or (meta.get("tickers") or [None])[0],
+                "source":      "SEC",                
+                "form":        meta.get("form") or form_safe.replace("_", " "),
+                "filingDate":  date,
+                "accession":   meta.get("accession"),
+                "txt_s3_key":  f"{comp}/texts/{form_safe}/{txt_name}",
+                "txt_bytes":   LOCAL_TMP_TXT.stat().st_size,
+                "ingest_ts":   datetime.now(timezone.utc)
+                                   .isoformat(timespec="milliseconds")
+                                   .replace("+00:00", "Z"),
+                "snippet":     snippet,
+                "stage":       "clean",
+            }
+
+            send_sec_metadata(rec, stream_name=KINESIS_STREAM)         
+            # ────────────────────────────────────────────────────────
+            
+            LOCAL_TMP_TXT.unlink(missing_ok=True)
+            time.sleep(0.25)          # be nice to the SEC site
         else:
             print("⚠️  SEC scrape failed")
 
-# -----------------------------------------------------------------------------
-# 2️⃣ ESG pipeline
-# -----------------------------------------------------------------------------
-
+# ─────────────────────── ESG helper functions ─────────────────────
 def list_esg_keys() -> List[str]:
-    keys: List[str] = []
+    ks: List[str] = []
     paginator = s3.get_paginator("list_objects_v2")
-    for p in paginator.paginate(Bucket=ESG_BUCKET, Prefix=ESG_PREFIX):
-        for obj in p.get("Contents", []):
-            k = obj["Key"]
-            if k.endswith(".txt"):
-                keys.append(k)
-    return keys
+    for pg in paginator.paginate(Bucket=ESG_BUCKET, Prefix=ESG_PREFIX):
+        ks.extend(o["Key"] for o in pg.get("Contents", []) if o["Key"].endswith(".txt"))
+    return ks
 
 
 def fallback_from_filename(fname: str) -> Optional[str]:
-    tokens = [tok for tok in re.split(r"[_\-]", fname) if len(tok) > 3]
+    tokens = [t for t in re.split(r"[_\-]", fname) if len(t) > 3]
     for tok in tokens:
         for d in BASE_JSON_DIR.iterdir():
             if tok.lower() in d.name.lower():
@@ -194,14 +220,14 @@ def fallback_from_filename(fname: str) -> Optional[str]:
 
 
 def download_esg_text(key: str) -> None:
-    parts = key.split("/")  # texts/{TICKER}/…
+    parts = key.split("/")            # texts/{TICKER}/...
     if len(parts) < 3:
         return
 
     ticker = parts[1]
     company = ticker_to_company(ticker)
 
-    # 1️⃣ prefix‑match SEC folders
+    # 1️⃣ prefix match against SEC folders
     if not company:
         for d in BASE_JSON_DIR.iterdir():
             if d.name.upper().startswith(ticker.upper()):
@@ -219,7 +245,7 @@ def download_esg_text(key: str) -> None:
         company = sanitize(ticker)
         print(f"❓ no map for {ticker}; using ticker folder")
     else:
-        learn_mapping(ticker, company)  # remember for future files
+        learn_mapping(ticker, company)
 
     dest_dir = LOCAL_TEXTS_DIR / sanitize(company) / "ESG"
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -236,10 +262,7 @@ def process_esg_texts() -> None:
     for key in list_esg_keys():
         download_esg_text(key)
 
-# -----------------------------------------------------------------------------
-# Entrypoint
-# -----------------------------------------------------------------------------
-
+# ───────────────────────── Entrypoint ─────────────────────────────
 def main() -> None:
     print("🚀  SEC pass …")
     process_sec_filings()

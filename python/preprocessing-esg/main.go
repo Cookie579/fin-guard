@@ -1,105 +1,95 @@
+// main.go — ESG-preprocessor entrypoint
+// ------------------------------------
+// Usage examples
+//
+//	go run . -mode=domain        # discover domains only
+//	go run . -mode=esg           # search ESG links only
+//	go run .                     # default = esg+domain
+//
+// Mode values:  esg | domain | esg+domain
 package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"os"
 )
 
-// Loaders
+// ── helper to load companies.json ────────────────────────────────
 func LoadCompanies(path string) ([]Company, error) {
-	file, err := os.Open(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer f.Close()
 
-	var data struct {
+	var wrap struct {
 		Companies []Company `json:"companies"`
 	}
-	err = json.NewDecoder(file).Decode(&data)
-	return data.Companies, err
+	if err := json.NewDecoder(f).Decode(&wrap); err != nil {
+		return nil, err
+	}
+	return wrap.Companies, nil
 }
 
+// ─────────────────────────── main ───────────────────────────────
 func main() {
-	log.Println("🌱 Starting ESG scraper preprocessor...")
+	mode := flag.String("mode", "esg+domain", "domain | esg | esg+domain")
+	flag.Parse()
 
+	log.Printf("🌱 Starting ESG pre-processor  (mode=%s)…", *mode)
+
+	// ---- config + company list ----------------------------------
 	companies, err := LoadCompanies("companies.json")
 	if err != nil {
-		log.Fatalf("❌ Failed to load companies.json: %v", err)
+		log.Fatalf("❌ load companies.json: %v", err)
 	}
-
-	// for local testing: cfg, err := LoadConfig("config.json")
-	cfg, err := LoadConfig()
+	cfg, err := LoadConfig() // or LoadConfig("config.json") locally
 	if err != nil {
-		log.Fatalf("❌ Failed to load config: %v", err)
+		log.Fatalf("❌ load config: %v", err)
 	}
 
-	for _, company := range companies {
-		key := fmt.Sprintf("scraping-jsons/%s_esg.json", company.Ticker)
-		exists, err := CheckIfExists("fin-processed-esg-reports", key)
-		if err != nil {
-			log.Printf("❌ S3 check failed for %s: %v", company.Ticker, err)
-			continue
+	// ---- 1️⃣ per-ticker domain discovery ------------------------
+	if *mode == "domain" || *mode == "esg+domain" {
+		for _, c := range companies {
+			if _, skipped, err := FindDomain(c, cfg); err != nil {
+				log.Printf("❌ domain lookup %s: %v", c.Ticker, err)
+			} else if !skipped {
+				log.Printf("🌐 domain saved for %s", c.Ticker)
+			}
 		}
-		if exists {
-			log.Printf("📁 %s already exists in S3 — skipping.", key)
-			continue
-		}
-
-		log.Printf("🔍 Searching ESG links for %s...", company.Name)
-		results, err := SearchESGLinks(company.Name, cfg)
-		if err != nil {
-			log.Printf("❌ Google search failed for %s: %v", company.Ticker, err)
-			continue
-		}
-
-		if err := SaveResults("fin-processed-esg-reports", key, results); err != nil {
-			log.Printf("❌ Failed to save %s to S3: %v", key, err)
-			continue
-		}
-
-		if err := SendToStream(cfg.KinesisStream, company.Ticker, results); err != nil {
-			log.Printf("❌ Failed to send to Kinesis for %s: %v", company.Ticker, err)
-			continue
-		}
-
-		log.Printf("✅ Done with %s", company.Ticker)
 	}
 
-	// === Domain Mapping Section (now includes full metadata) ===
-	const domainKey = "Company_Domain_Links/company_domains.json"
-	domainExists, err := CheckIfExists("fin-processed-esg-reports", domainKey)
-	if err != nil {
-		log.Printf("❌ Could not check if domain map exists: %v", err)
-	}
+	// ---- 2️⃣ ESG link search & save -----------------------------
+	if *mode == "esg" || *mode == "esg+domain" {
+		for _, c := range companies {
+			key := fmt.Sprintf("scraping-jsons/%s_esg.json", c.Ticker)
 
-	if !domainExists {
-		log.Println("🌐 Domain mapping file not found. Generating...")
-
-		domainMap := make(map[string]DomainEntry)
-		for _, company := range companies {
-			domain, err := FindDomain(company.Name, cfg)
-			if err != nil {
-				log.Printf("❌ Failed to find domain for %s: %v", company.Name, err)
+			if ok, _ := CheckIfExists("fin-processed-esg-reports", key); ok {
+				log.Printf("📁 %s already on S3 — skip", key)
 				continue
 			}
-			domainMap[company.Name] = DomainEntry{
-				Name:   company.Name,
-				Ticker: company.Ticker,
-				Domain: domain,
-			}
-		}
 
-		if err := SaveDomainEntries("fin-processed-esg-reports", domainKey, domainMap); err != nil {
-			log.Printf("❌ Failed to save domain map to S3: %v", err)
-		} else {
-			log.Printf("✅ Domain map uploaded to s3://%s/%s", "fin-processed-esg-reports", domainKey)
+			log.Printf("🔍 Google ESG search for %s …", c.Name)
+			results, err := SearchESGLinks(c.Name, cfg) // could later add site: filter
+			if err != nil {
+				log.Printf("❌ search %s: %v", c.Ticker, err)
+				continue
+			}
+
+			if err := SaveResults("fin-processed-esg-reports", key, results); err != nil {
+				log.Printf("❌ S3 put %s: %v", key, err)
+				continue
+			}
+			if err := SendToStream(cfg.KinesisStream, c.Ticker, results); err != nil {
+				log.Printf("❌ Kinesis push %s: %v", c.Ticker, err)
+			}
+
+			log.Printf("✅ ESG links stored for %s", c.Ticker)
 		}
-	} else {
-		log.Println("📁 Domain mapping file already exists — skipping.")
 	}
 
-	log.Println("✅ Preprocessing ESG scraping completed.")
+	log.Println("🎉 Pre-processing complete.")
 }

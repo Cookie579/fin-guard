@@ -9,6 +9,8 @@ import (
 	"github.com/aws/aws-sdk-go/service/kinesis"
 )
 
+var kinesisClient = kinesis.New(session.Must(session.NewSession()))
+
 func SendToStream(streamName, ticker string, items []SearchItem) error {
 	sess := session.Must(session.NewSession())
 	svc := kinesis.New(sess)
@@ -32,5 +34,14 @@ func SendToStream(streamName, ticker string, items []SearchItem) error {
 	if err == nil {
 		log.Printf("📤 Sent %d links to Kinesis for %s", len(items), ticker)
 	}
+	return err
+}
+
+func SendToStreamRaw(streamName, partitionKey string, data []byte) error {
+	_, err := kinesisClient.PutRecord(&kinesis.PutRecordInput{
+		StreamName:   aws.String(streamName),
+		PartitionKey: aws.String(partitionKey),
+		Data:         data,
+	})
 	return err
 }

@@ -91,3 +91,19 @@ func SaveDomainEntries(bucket, key string, entries map[string]DomainEntry) error
 	})
 	return err
 }
+
+// PutDomainToS3 saves a single DomainEntry as JSON
+func PutDomainToS3(bucket, key string, entry *DomainEntry) error {
+	sess := session.Must(session.NewSession(&aws.Config{
+		Region: aws.String("us-east-1"),
+	}))
+	svc := s3.New(sess)
+
+	body, _ := json.Marshal(entry)
+	_, err := svc.PutObject(&s3.PutObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+		Body:   bytes.NewReader(body),
+	})
+	return err
+}

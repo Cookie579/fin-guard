@@ -1,7 +1,7 @@
 import json
 import boto3
 
-BUCKET_NAME = "fin-processed-filings"  # 🔁 Replace with your actual bucket name
+BUCKET_NAME = "fin-processed-filings" 
 
 s3 = boto3.client("s3")
 
