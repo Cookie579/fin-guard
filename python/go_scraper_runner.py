@@ -5,7 +5,7 @@ SCRAPER_PATHS = [
     "python/preprocessing-esg/main.go",
     "python/preprocessing-esg/domain_search.go",
     "python/preprocessing-esg/domain.go",
-    "python/preprocessing-esg/google.go",
+    "python/preprocessing-esg/serper.go",
     "python/preprocessing-esg/models.go",
     "python/preprocessing-esg/s3.go",
     "python/preprocessing-esg/kinesis.go",

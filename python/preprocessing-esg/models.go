@@ -23,6 +23,7 @@ type Config struct {
 	GoogleSearchCX string `json:"google_cx"`
 	KinesisStream  string `json:"kinesis_stream"`
 	AWSRegion      string `json:"aws_region"`
+	SerperAPIKey   string `json:"serper_api_key"`
 }
 
 func LoadConfig() (*Config, error) {
