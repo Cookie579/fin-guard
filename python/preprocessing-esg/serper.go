@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -19,7 +20,6 @@ type SearchResults struct {
 	Items []SearchItem `json:"items"`
 }
 
-// Serper response (we only need the organic list)
 type serperResp struct {
 	Organic []struct {
 		Title string `json:"title"`
@@ -27,13 +27,13 @@ type serperResp struct {
 	} `json:"organic"`
 }
 
-// SearchESGLinks queries Serper.dev (100 results per pillar, no time window)
+// 100 results per pillar, PDFs + HTML, no date filters
 func SearchESGLinks(company string, cfg *Config) ([]SearchItem, error) {
-	if cfg.SerperAPIKey == "" {
-		return nil, fmt.Errorf("SerperAPIKey missing: set serper_api_key in config.json or SERPER_API_KEY env var")
+	if strings.TrimSpace(cfg.SerperAPIKey) == "" {
+		return nil, fmt.Errorf("SerperAPIKey missing: set serper_api_key in config.json or SERPER_API_KEY")
 	}
+	client := &http.Client{Timeout: 20 * time.Second}
 
-	// Broaden coverage with a few pillar keywords (same as before)
 	pillars := []string{
 		"ESG report",
 		"sustainability report",
@@ -42,25 +42,21 @@ func SearchESGLinks(company string, cfg *Config) ([]SearchItem, error) {
 		"DEI report",
 	}
 
-	client := &http.Client{Timeout: 20 * time.Second}
-
 	seen := make(map[string]bool)
 	var combined []SearchItem
 
 	for _, pillar := range pillars {
-		// Plain query; no time window, no filetype restriction (returns PDFs + HTML)
 		q := fmt.Sprintf("%s %s site:.com", company, pillar)
 
-		payload, _ := json.Marshal(map[string]any{
-			"q":           q,
-			"num":         100, // ask for the full top-100
-			"gl":          "us",
-			"hl":          "en",
-			"autocorrect": false,
+		body, _ := json.Marshal(map[string]any{
+			"q":   q,
+			"num": 100,  // ask for full top-100
+			"gl":  "us", // locale hints; safe
+			"hl":  "en",
 		})
 
-		req, _ := http.NewRequest("POST", "https://google.serper.dev/search", bytes.NewReader(payload))
-		req.Header.Set("X-API-KEY", cfg.SerperAPIKey)
+		req, _ := http.NewRequest("POST", "https://google.serper.dev/search", bytes.NewReader(body))
+		req.Header.Set("X-API-KEY", strings.TrimSpace(cfg.SerperAPIKey))
 		req.Header.Set("Content-Type", "application/json")
 
 		resp, err := client.Do(req)
@@ -69,11 +65,9 @@ func SearchESGLinks(company string, cfg *Config) ([]SearchItem, error) {
 		}
 		defer resp.Body.Close()
 
-		if resp.StatusCode == http.StatusTooManyRequests {
-			return nil, fmt.Errorf("serper.dev: rate limited (429). Slow down requests")
-		}
 		if resp.StatusCode >= 300 {
-			return nil, fmt.Errorf("serper.dev HTTP %d", resp.StatusCode)
+			b, _ := io.ReadAll(resp.Body)
+			return nil, fmt.Errorf("serper.dev HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(b)))
 		}
 
 		var parsed serperResp
@@ -85,13 +79,15 @@ func SearchESGLinks(company string, cfg *Config) ([]SearchItem, error) {
 			if o.Link == "" {
 				continue
 			}
-			// normalize URL (trim tracking params if you want)
 			if u, err := url.Parse(o.Link); err == nil {
-				u.Fragment = ""
+				u.Fragment = "" // drop #anchors
 				o.Link = u.String()
 			}
 			if !seen[o.Link] {
-				combined = append(combined, SearchItem{Title: strings.TrimSpace(o.Title), Link: o.Link})
+				combined = append(combined, SearchItem{
+					Title: strings.TrimSpace(o.Title),
+					Link:  o.Link,
+				})
 				seen[o.Link] = true
 			}
 		}
