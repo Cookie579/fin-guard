@@ -31,6 +31,22 @@ func CheckIfExists(bucket, key string) (bool, error) {
 	return true, nil
 }
 
+// PrefixExists checks if at least one object exists with the given prefix.
+func PrefixExists(bucket, prefix string) (bool, error) {
+	sess := session.Must(session.NewSession(&aws.Config{Region: aws.String("us-east-1")}))
+	svc := s3.New(sess)
+
+	out, err := svc.ListObjectsV2(&s3.ListObjectsV2Input{
+		Bucket:  aws.String(bucket),
+		Prefix:  aws.String(prefix),
+		MaxKeys: aws.Int64(1),
+	})
+	if err != nil {
+		return false, err
+	}
+	return *out.KeyCount > 0, nil
+}
+
 func SaveDomainMap(bucket, key string, data map[string]string) error {
 	sess := session.Must(session.NewSession(&aws.Config{
 		Region: aws.String("us-east-1"),
