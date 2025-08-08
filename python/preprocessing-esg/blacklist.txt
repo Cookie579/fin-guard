@@ -1,0 +1,24 @@
+# File sharing / doc hosting
+scribd.com
+slideshare.net
+studocu.com
+studocu.vn
+docplayer.net
+issuu.com
+calameo.com
+academia.edu
+researchgate.net
+
+# Social media
+twitter.com
+x.com
+instagram.com
+tiktok.com
+stocktwits.com
+pinterest.com
+
+
+# Low-value aggregator / SEO spam
+archive.org
+issgovernance.com
+responsibilityreports.com

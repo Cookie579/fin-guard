@@ -32,7 +32,7 @@ type ESGLinkRecord struct {
 	IngestTS string `json:"ingest_ts"`
 
 	Source     string `json:"source"`     // "ESG"
-	State      string `json:"state"`      // "raw"
+	Stage      string `json:"stage"`      // "raw"
 	FilingDate string `json:"filingDate"` // YYYY-MM-DD
 }
 
@@ -94,8 +94,8 @@ func LoadSeenURLs(bucket, ticker string) (map[string]bool, error) {
 			if err != nil {
 				continue
 			}
-			if url := extractURL(out.Body); url != "" {
-				seen[url] = true
+			if u := extractURL(out.Body); u != "" {
+				seen[u] = true
 			}
 			out.Body.Close()
 		}
@@ -114,7 +114,7 @@ func extractURL(r io.Reader) string {
 			break
 		}
 	}
-	var tmp map[string]interface{}
+	var tmp map[string]any
 	if json.Unmarshal(buf.Bytes(), &tmp) == nil {
 		if u, ok := tmp["url"].(string); ok {
 			return u
@@ -158,6 +158,15 @@ func main() {
 		log.Fatalf("load config: %v", err)
 	}
 
+	/* 0️⃣  blacklist (optional) */
+	blacklist, err := LoadBlacklist("blacklist.txt")
+	if err != nil {
+		log.Printf("⚠️  no blacklist loaded (%v); proceeding without it", err)
+		blacklist = map[string]struct{}{}
+	} else {
+		log.Printf("🛡️  loaded %d blacklist domains", len(blacklist))
+	}
+
 	/* 1️⃣  domain discovery (unchanged) */
 	if *mode == "domain" || *mode == "esg+domain" {
 		for _, c := range companies {
@@ -170,11 +179,10 @@ func main() {
 	}
 
 	/* 2️⃣  ESG scraping ---------------------------------------- */
-	newDomains := map[string]bool{} // collect for annotation upload
-
 	if *mode == "esg" || *mode == "esg+domain" {
 		for _, c := range companies {
 
+			// URLs we already saved for this ticker → skip re-uploads
 			seen, _ := LoadSeenURLs("fin-processed-esg-reports", c.Ticker)
 
 			log.Printf("🔍 Google ESG search for %s …", c.Name)
@@ -186,17 +194,34 @@ func main() {
 
 			newCount := 0
 			for _, item := range results {
+				// 2a) skip if we've already uploaded this exact URL
 				if seen[item.Link] {
 					continue
 				}
 
+				// 2b) skip if host is blacklisted
+				if u, err := url.Parse(item.Link); err == nil {
+					h := u.Hostname()
+					blocked := false
+					for d := range blacklist {
+						if hostMatchesDomain(h, d) {
+							blocked = true
+							break
+						}
+					}
+					if blocked {
+						continue
+					}
+				}
+
+				// 2c) build record and save
 				rec := ESGLinkRecord{
 					Ticker:   c.Ticker,
 					Title:    item.Title,
 					URL:      item.Link,
 					IngestTS: time.Now().UTC().Format(time.RFC3339),
 					Source:   "ESG",
-					State:    "raw",
+					Stage:    "raw",
 				}
 				if d := inferDateFromURL(item.Link); d != "" {
 					rec.FilingDate = d
@@ -212,15 +237,11 @@ func main() {
 				if err := SendLinkRecord(cfg.KinesisStream, rec); err != nil {
 					log.Printf("Kinesis push %s: %v", c.Ticker, err)
 				}
-
-				// track domain for exclusion
-				if u, _ := url.Parse(item.Link); u != nil && u.Host != "" {
-					newDomains[u.Host] = true
-				}
 				newCount++
 			}
-			log.Printf("✅ %s (new=%d / google=%d)", c.Ticker, newCount, len(results))
+			log.Printf("✅ %s (new=%d / serp=%d)", c.Ticker, newCount, len(results))
 		}
 	}
+
 	log.Println("🎉 Pre-processing complete.")
 }

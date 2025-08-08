@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 )
@@ -21,6 +23,35 @@ type serperResp struct {
 		Title string `json:"title"`
 		Link  string `json:"link"`
 	} `json:"organic"`
+}
+
+// LoadBlacklist reads one domain per line and returns a set.
+// Lines can be like:  scribd.com   responsibilityreports.com
+func LoadBlacklist(path string) (map[string]struct{}, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	blk := make(map[string]struct{})
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		d := strings.ToLower(strings.TrimSpace(sc.Text()))
+		if d == "" || strings.HasPrefix(d, "#") {
+			continue
+		}
+		blk[d] = struct{}{}
+	}
+	return blk, sc.Err()
+}
+
+// hostMatchesDomain matches exact host or any subdomain of domain
+// host: www.s2.q4cdn.com   domain: q4cdn.com   => true
+func hostMatchesDomain(host, domain string) bool {
+	host = strings.ToLower(host)
+	domain = strings.ToLower(domain)
+	return host == domain || strings.HasSuffix(host, "."+domain)
 }
 
 func SearchESGLinks(company string, cfg *Config) ([]SearchItem, error) {
