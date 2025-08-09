@@ -13,9 +13,22 @@ type Company struct {
 }
 
 type DomainEntry struct {
-	Name   string `json:"name"`
-	Ticker string `json:"ticker"`
-	Domain string `json:"domain"`
+	Company  string `json:"company"`
+	Ticker   string `json:"ticker"`
+	Domain   string `json:"domain"`
+	Source   string `json:"source"`    // always "domain"
+	IngestTS string `json:"ingest_ts"` // RFC3339 UTC
+}
+
+type ESGLinkRecord struct {
+	Ticker   string `json:"ticker"`
+	Title    string `json:"title"`
+	URL      string `json:"url"`
+	IngestTS string `json:"ingest_ts"`
+
+	Source     string `json:"source"`     // "ESG"
+	Stage      string `json:"stage"`      // "raw"
+	FilingDate string `json:"filingDate"` // YYYY-MM-DD
 }
 
 type Config struct {

@@ -23,19 +23,6 @@ import (
 	"github.com/aws/aws-sdk-go/service/s3"
 )
 
-/* ───────────────────────── record ─────────────────────────── */
-
-type ESGLinkRecord struct {
-	Ticker   string `json:"ticker"`
-	Title    string `json:"title"`
-	URL      string `json:"url"`
-	IngestTS string `json:"ingest_ts"`
-
-	Source     string `json:"source"`     // "ESG"
-	Stage      string `json:"stage"`      // "raw"
-	FilingDate string `json:"filingDate"` // YYYY-MM-DD
-}
-
 /* ─────────────────────── helpers ──────────────────────────── */
 
 var (

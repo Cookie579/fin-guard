@@ -13,23 +13,19 @@ const DOMAIN_BUCKET = "fin-processed-esg-reports"
 
 // ───────────────────────── helper key builder ────────────────────
 // e.g. company_domains/Apple-Domain-2025-08-06.json
-func domainS3Key(company string, t time.Time) string {
-	safeName := strings.ReplaceAll(company, " ", "_") // keep key URL-safe
+func domainS3Key(ticker string, t time.Time) string {
+	tk := strings.ToUpper(strings.TrimSpace(ticker))
 	return fmt.Sprintf(
 		"company_domains/%s-domain-%04d-%02d-%02d.json",
-		safeName,
-		t.Year(),
-		int(t.Month()),
-		t.Day(),
+		tk, t.Year(), int(t.Month()), t.Day(),
 	)
 }
 
-// ────────────────────────── core function ────────────────────────
 func FindDomain(c Company, cfg *Config) (*DomainEntry, bool, error) {
-	// 1️⃣  Build the key up front (no host needed)
-	key := domainS3Key(c.Name, time.Now().UTC())
+	now := time.Now().UTC()
+	key := domainS3Key(c.Ticker, now)
 
-	// 2️⃣  Skip if today’s file already exists
+	// 1) Skip if today's file already exists
 	exists, err := CheckIfExists(DOMAIN_BUCKET, key)
 	if err != nil {
 		return nil, false, fmt.Errorf("S3 head: %w", err)
@@ -39,7 +35,7 @@ func FindDomain(c Company, cfg *Config) (*DomainEntry, bool, error) {
 		return nil, true, nil
 	}
 
-	// 3️⃣  Google search for the official domain
+	// 2) Google programmable search for official site
 	query := fmt.Sprintf("%s official site", c.Name)
 	results, err := GoogleSearch(query, cfg)
 	if err != nil {
@@ -57,20 +53,22 @@ func FindDomain(c Company, cfg *Config) (*DomainEntry, bool, error) {
 		return nil, false, fmt.Errorf("no valid domain found")
 	}
 
-	// 4️⃣  Assemble JSON payload
+	// 3) Build payload with new fields
 	entry := &DomainEntry{
-		Name:   c.Name,
-		Ticker: c.Ticker,
-		Domain: host,
+		Company:  c.Name,
+		Ticker:   c.Ticker,
+		Domain:   host,
+		Source:   "DOMAIN",
+		IngestTS: now.Format(time.RFC3339),
 	}
 
-	// 5️⃣  Upload to S3 using the new key
+	// 4) Save JSON to S3
 	if err := PutDomainToS3(DOMAIN_BUCKET, key, entry); err != nil {
 		return nil, false, fmt.Errorf("S3 put: %w", err)
 	}
 	fmt.Printf("✅ uploaded s3://%s/%s\n", DOMAIN_BUCKET, key)
 
-	// 6️⃣  Publish a tiny event to Kinesis
+	// 5) Publish to the reference stream
 	if err := SendDomainToStream(cfg.ReferenceStream, entry); err != nil {
 		fmt.Printf("⚠️ Kinesis push failed: %v\n", err)
 	}
