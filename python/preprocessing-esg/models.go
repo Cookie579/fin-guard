@@ -19,11 +19,12 @@ type DomainEntry struct {
 }
 
 type Config struct {
-	GoogleAPIKey   string `json:"google_api_key"`
-	GoogleSearchCX string `json:"google_cx"`
-	KinesisStream  string `json:"kinesis_stream"`
-	AWSRegion      string `json:"aws_region"`
-	SerperAPIKey   string `json:"serper_api_key"`
+	GoogleAPIKey    string `json:"google_api_key"`
+	GoogleSearchCX  string `json:"google_cx"`
+	KinesisStream   string `json:"kinesis_stream"`
+	AWSRegion       string `json:"aws_region"`
+	SerperAPIKey    string `json:"serper_api_key"`
+	ReferenceStream string `json:"reference_stream"`
 }
 
 func LoadConfig() (*Config, error) {

@@ -17,7 +17,6 @@ tiktok.com
 stocktwits.com
 pinterest.com
 
-
 # Low-value aggregator / SEO spam
 archive.org
 issgovernance.com

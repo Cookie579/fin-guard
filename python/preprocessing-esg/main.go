@@ -40,7 +40,7 @@ type ESGLinkRecord struct {
 
 var (
 	badChars    = regexp.MustCompile(`[^A-Za-z0-9_-]+`)
-	datePattern = regexp.MustCompile(`(\d{4})([/-](\d{2}))?([/-](\d{2}))?`)
+	datePattern = regexp.MustCompile(`\b(19[0-9]{2}|20[0-9]{2}|2100)\b`)
 )
 
 func slugify(s string) string {
@@ -59,17 +59,17 @@ func linkS3Key(company, ticker, title, u string, t time.Time) string {
 }
 
 func inferDateFromURL(u string) string {
-	if m := datePattern.FindStringSubmatch(u); m != nil {
-		yy, mm, dd := m[1], m[3], m[5]
-		switch {
-		case mm == "":
-			return yy + "-01-01"
-		case dd == "":
-			return fmt.Sprintf("%s-%s-01", yy, mm)
-		default:
-			return fmt.Sprintf("%s-%s-%s", yy, mm, dd)
-		}
+	// Look for year first
+	if m := datePattern.FindString(u); m != "" {
+		return fmt.Sprintf("%s-01-01", m) // default to Jan 1 if no month/day
 	}
+
+	// Then try full YYYY-MM-DD or YYYY/MM/DD
+	reFull := regexp.MustCompile(`\b(19[0-9]{2}|20[0-9]{2}|2100)[/-](0[1-9]|1[0-2])[/-](0[1-9]|[12][0-9]|3[01])\b`)
+	if m := reFull.FindStringSubmatch(u); m != nil {
+		return fmt.Sprintf("%s-%s-%s", m[1], m[2], m[3])
+	}
+
 	return ""
 }
 

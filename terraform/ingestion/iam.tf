@@ -3,6 +3,10 @@
 #                  + S3 WRITE   (fin-processed-filings)
 #                  + S3 R/W/L   (fin-processed-esg-reports)
 ############################################################
+data "aws_kinesis_stream" "reference" {
+  name = "fin-guard-reference"
+}
+
 data "aws_iam_policy_document" "preprocess_access" {
 
   ########################################
@@ -49,6 +53,19 @@ data "aws_iam_policy_document" "preprocess_access" {
       "s3:PutObject"
     ]
     resources = ["${aws_s3_bucket.esg.arn}/*"]
+  }
+
+  statement {
+    sid     = "KinesisWriteReference"
+    effect  = "Allow"
+    actions = [
+      "kinesis:DescribeStream",
+      "kinesis:DescribeStreamSummary",
+      "kinesis:ListShards",
+      "kinesis:PutRecord",
+      "kinesis:PutRecords"
+    ]
+    resources = [data.aws_kinesis_stream.reference.arn]
   }
 }
 

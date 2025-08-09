@@ -71,7 +71,7 @@ func FindDomain(c Company, cfg *Config) (*DomainEntry, bool, error) {
 	fmt.Printf("✅ uploaded s3://%s/%s\n", DOMAIN_BUCKET, key)
 
 	// 6️⃣  Publish a tiny event to Kinesis
-	if err := SendDomainToStream(cfg.KinesisStream, entry); err != nil {
+	if err := SendDomainToStream(cfg.ReferenceStream, entry); err != nil {
 		fmt.Printf("⚠️ Kinesis push failed: %v\n", err)
 	}
 
