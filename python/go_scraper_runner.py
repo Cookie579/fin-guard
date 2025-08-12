@@ -9,9 +9,10 @@ SCRAPER_PATHS = [
     "python/preprocessing-esg/models.go",
     "python/preprocessing-esg/s3.go",
     "python/preprocessing-esg/kinesis.go",
+    "python/preprocessing-esg/downloader.go",
 ]
 
-PROJECT_ROOT = pathlib.Path("/app")  # adjust to container’s workdir
+PROJECT_ROOT = pathlib.Path("/app")
 
 def _run_go_scraper(mode: str):
     try:
@@ -26,6 +27,8 @@ def _run_go_scraper(mode: str):
         print(f"🌿 GO scraper [{mode}] stdout:\n{result.stdout}")
         if result.stderr:
             print(f"⚠️ GO scraper [{mode}] stderr:\n{result.stderr}")
+        if result.returncode != 0:
+            print(f"❌ GO scraper exited with code {result.returncode}")
     except Exception as e:
         print(f"❌ Failed to run Go scraper ({mode}): {e}")
 
@@ -34,3 +37,6 @@ def run_esg_scraper():
 
 def run_domain_scraper():
     _run_go_scraper("domain")
+
+def run_download_scraper():
+    _run_go_scraper("download")

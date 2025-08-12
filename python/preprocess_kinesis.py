@@ -4,12 +4,14 @@
 # Requires:
 #   fastapi
 #   uvicorn
-#   kinesis_reader.py
-#   go_scraper_runner.py   (contains run_esg_scraper / run_domain_scraper)
+#   go_scraper_runner.py   (contains run_* helpers)
 
 from fastapi import FastAPI, BackgroundTasks
-from kinesis_reader import process_kinesis_stream
-from go_scraper_runner import run_esg_scraper, run_domain_scraper
+from go_scraper_runner import (
+    run_esg_scraper,
+    run_domain_scraper,
+    run_download_scraper,   # ⬅️ new
+)
 
 app = FastAPI(title="Fin-Guard Pre-processing Service")
 
@@ -19,14 +21,6 @@ app = FastAPI(title="Fin-Guard Pre-processing Service")
 def root():
     """Simple heartbeat."""
     return {"status": "Pre-processing service is up"}
-
-
-# ── 1️⃣  start continuous Kinesis consumer ───────────────────────
-@app.post("/start-processing", tags=["kinesis"])
-def start_processing(background_tasks: BackgroundTasks):
-    """Begin the long-running Kinesis stream processor."""
-    background_tasks.add_task(process_kinesis_stream)
-    return {"message": "Kinesis stream processing started"}
 
 
 # ── 2️⃣  ESG link scraper (Go, mode=esg) ─────────────────────────
@@ -43,3 +37,11 @@ def scrape_domain(background_tasks: BackgroundTasks):
     """Trigger the Go scraper to discover company domains only."""
     background_tasks.add_task(run_domain_scraper)
     return {"message": "Domain discovery started"}
+
+
+# ── 4️⃣  ESG downloader (Go, mode=download) ─────────────────────
+@app.post("/scrape-download", tags=["scraper"])
+def scrape_download(background_tasks: BackgroundTasks):
+    """Trigger the Go scraper to download ESG docs (mode=download)."""
+    background_tasks.add_task(run_download_scraper)
+    return {"message": "ESG download started"}

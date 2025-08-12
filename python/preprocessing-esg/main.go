@@ -136,6 +136,12 @@ func main() {
 
 	log.Printf("🌱 ESG pre-processor starting (mode=%s)…", *mode)
 
+	if *mode == "download" {
+		download()
+		log.Println("🎉 Download-only run complete.")
+		return
+	}
+
 	companies, err := LoadCompanies("companies.json")
 	if err != nil {
 		log.Fatalf("load companies.json: %v", err)

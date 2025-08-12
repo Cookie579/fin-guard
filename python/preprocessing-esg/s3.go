@@ -2,13 +2,17 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"io"
 	"log"
+	"path/filepath"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
+	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 )
 
 func CheckIfExists(bucket, key string) (bool, error) {
@@ -116,4 +120,72 @@ func PutLinkRecordToS3(bucket, key string, rec ESGLinkRecord) error {
 		log.Printf("✅ Saved JSON to s3://%s/%s", bucket, key)
 	}
 	return err
+}
+
+func LoadJSONFromS3(bucket, key string) ([]byte, error) {
+	sess := session.Must(session.NewSession(&aws.Config{
+		Region: aws.String("us-east-1"),
+	}))
+
+	svc := s3.New(sess)
+
+	out, err := svc.GetObject(&s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer out.Body.Close()
+
+	var buf bytes.Buffer
+	_, err = io.Copy(&buf, out.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	log.Printf("✅ Loaded %s from s3://%s", key, bucket)
+	return buf.Bytes(), nil
+}
+
+func FileExistsInS3(bucket, key string) (bool, error) {
+	sess := session.Must(session.NewSession(&aws.Config{
+		Region: aws.String("us-east-1"),
+	}))
+	svc := s3.New(sess)
+
+	_, err := svc.HeadObject(&s3.HeadObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	})
+
+	if err != nil {
+		if aerr, ok := err.(awserr.Error); ok && aerr.Code() == "NotFound" {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func NewS3Uploader(region string) *s3manager.Uploader {
+	sess := session.Must(session.NewSession(&aws.Config{
+		Region: aws.String(region),
+	}))
+	return s3manager.NewUploader(sess)
+}
+
+func UploadToS3(ctx context.Context, uploader *s3manager.Uploader, bucket, key string, reader io.Reader, contentType string) error {
+	_, err := uploader.UploadWithContext(ctx, &s3manager.UploadInput{
+		Bucket:      aws.String(bucket),
+		Key:         aws.String(key),
+		Body:        reader,
+		ContentType: aws.String(contentType),
+	})
+	return err
+}
+
+func BuildS3Key(ticker, filename string) string {
+	// OLD: return filepath.Join("reports", ticker, filename)
+	return filepath.Join("esg-reports", ticker, filename)
 }
