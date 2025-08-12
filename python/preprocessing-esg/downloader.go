@@ -171,17 +171,13 @@ func download() {
 						fileBase = "esg_01"
 					}
 
-					// filing date → year partition
+					// filing date only (no year in payload)
 					fd := firstNonEmptyString(it, "filingDate", "filingdate")
 					if strings.TrimSpace(fd) == "" {
 						fd = inferDateFromURL(u)
 					}
 					if strings.TrimSpace(fd) == "" {
 						fd = time.Now().Format("2006-01-02")
-					}
-					yr := "0000"
-					if len(fd) >= 4 {
-						yr = fd[:4]
 					}
 
 					// build S3 key prefix and upload
@@ -196,28 +192,26 @@ func download() {
 						continue
 					}
 
-					// Kinesis metadata payload for Glue table
+					// Kinesis metadata payload (NO 'year' field)
 					now := time.Now().UTC().Format(time.RFC3339)
 					fileType := strings.TrimPrefix(ext, ".")
 					meta := map[string]interface{}{
 						"company":      t.Company,
 						"form":         "",
-						"filingdate":   fd, // glue column name
-						"filingDate":   fd, // keep camelCase for continuity
+						"filingDate":   fd, // <-- only this; no 'year'
 						"accession":    "",
 						"title":        title,
 						"url":          u,
-						"txt_s3_key":   key,    // glue column
-						"txt_bytes":    nbytes, // glue column
-						"ingest_ts":    now,    // glue column (timestamp)
+						"txt_s3_key":   key,
+						"txt_bytes":    nbytes,
+						"ingest_ts":    now,
 						"snippet":      "",
-						"ticker":       t.Ticker,                               // partition(0)
-						"source":       "ESG",                                  // partition(1)
-						"stage":        "download",                             // partition(2)
-						"year":         yr,                                     // partition(3)
-						"file_type":    fileType,                               // extra
-						"content_type": ctype,                                  // extra
-						"s3_uri":       fmt.Sprintf("s3://%s/%s", bucket, key), // extra
+						"ticker":       t.Ticker,
+						"source":       "ESG",
+						"stage":        "download",
+						"file_type":    fileType,
+						"content_type": ctype,
+						"s3_uri":       fmt.Sprintf("s3://%s/%s", bucket, key),
 					}
 					data, _ := json.Marshal(meta)
 					if err := SendToStreamRaw(streamName, t.Ticker, data); err != nil {
