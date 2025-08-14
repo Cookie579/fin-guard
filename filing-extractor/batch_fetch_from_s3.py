@@ -27,7 +27,7 @@ import boto3
 # ─────────────────────────── S3 settings ───────────────────────────
 SEC_BUCKET = "fin-processed-filings"
 ESG_BUCKET = "fin-processed-esg-reports"
-ESG_PREFIX = "texts/"           # inside ESG_BUCKET
+ESG_PREFIX = "esg-reports/"           
 KINESIS_STREAM = "fin-guard-stream"
 
 # ───────────────────────── Local paths ─────────────────────────────
@@ -54,6 +54,9 @@ def learn_mapping(ticker: str, company: str) -> None:
         TICKER_MAP[t] = c
         print(f"🧠  Learned mapping: {t} → {c}")
 
+def safe_filename(name: str) -> str:
+    # allow dots, dashes, underscores; replace everything else
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", name)
 
 def ticker_to_company(ticker: str) -> Optional[str]:
     return TICKER_MAP.get(ticker.upper().strip())
@@ -200,13 +203,125 @@ def process_sec_filings() -> None:
             time.sleep(0.25)          # be nice to the SEC site
         else:
             print("⚠️  SEC scrape failed")
+            
+# ─────────────────────── ESG text extraction helpers ──────────────
+def _parse_date_from_name(name: str) -> Optional[str]:
+    """
+    Try to find YYYY[-MM[-DD]] in filename. Return 'YYYY-MM-DD' when possible.
+    """
+    m = re.search(r'(?P<y>20\d{2})(?:[-_/\.](?P<m>\d{2}))?(?:[-_/\.](?P<d>\d{2}))?', name)
+    if not m:
+        return None
+    y = m.group('y')
+    mth = m.group('m') or '01'
+    day = m.group('d') or '01'
+    # basic sanity
+    if not (1 <= int(mth) <= 12 and 1 <= int(day) <= 31):
+        return None
+    return f"{y}-{mth}-{day}"
+
+def _extract_text_from_file(path: Path) -> str:
+    """
+    Return plain text from HTML/PDF/TXT/JSON. Raise on failure.
+    """
+    suf = path.suffix.lower()
+
+    if suf in ('.txt',):
+        return path.read_text(encoding='utf-8', errors='replace')
+
+    if suf in ('.html', '.htm'):
+        from bs4 import BeautifulSoup
+        raw = path.read_text(encoding='utf-8', errors='replace')
+        soup = BeautifulSoup(raw, 'html.parser')
+        # Add line breaks for block-ish tags
+        for tag in soup.find_all(['br', 'p', 'tr', 'table', 'div', 'li', 'h1','h2','h3','h4','h5','h6']):
+            tag.append('\n')
+        text = soup.get_text()
+        text = re.sub(r'[ \t\r]+', ' ', text)
+        text = re.sub(r'\n{2,}', '\n\n', text)
+        return text.strip()
+
+    if suf == '.pdf':
+        # Try pdfminer.six (preferred), fall back to PyPDF2 if missing
+        try:
+            from pdfminer.high_level import extract_text
+            txt = extract_text(str(path)) or ""
+            return txt.strip()
+        except Exception as e_pdfminer:
+            try:
+                import PyPDF2
+                out = []
+                with open(path, 'rb') as f:
+                    reader = PyPDF2.PdfReader(f)
+                    for page in reader.pages:
+                        out.append(page.extract_text() or "")
+                return "\n".join(out).strip()
+            except Exception as e_pypdf:
+                raise RuntimeError(f"PDF extract failed with pdfminer ({e_pdfminer}) and PyPDF2 ({e_pypdf})")
+
+    if suf == '.json':
+        try:
+            obj = json.loads(path.read_text(encoding='utf-8', errors='replace'))
+        except Exception as e:
+            raise RuntimeError(f"JSON parse failed: {e}")
+        # common fields where scraped text might live
+        for key in ('text', 'content', 'body', 'html', 'plaintext'):
+            if key in obj and isinstance(obj[key], str) and obj[key].strip():
+                return obj[key]
+        # sometimes an array of paragraphs
+        for key in ('paragraphs', 'lines'):
+            if key in obj and isinstance(obj[key], list):
+                return "\n".join(str(x) for x in obj[key])
+        raise RuntimeError("No obvious text field in JSON")
+
+    raise RuntimeError(f"Unsupported ESG file type: {suf}")
+
+def _esg_s3_key_for(ticker: str, txt_name: str) -> str:
+    return f"texts/{sanitize(ticker.upper())}/{txt_name}"
+
+def _esg_uploaded(ticker: str, txt_name: str) -> bool:
+    key = _esg_s3_key_for(ticker, txt_name)
+    try:
+        s3.head_object(Bucket=ESG_BUCKET, Key=key)
+        return True
+    except s3.exceptions.ClientError:
+        return False
+
+def _upload_clean_esg(local_txt: Path, ticker: str, txt_name: str) -> None:
+    key = _esg_s3_key_for(ticker, txt_name)
+    s3.upload_file(str(local_txt), ESG_BUCKET, key)
+    print(f"✅  Uploaded ESG: s3://{ESG_BUCKET}/{key}")
 
 # ─────────────────────── ESG helper functions ─────────────────────
 def list_esg_keys() -> List[str]:
     ks: List[str] = []
+    seen_total = 0
     paginator = s3.get_paginator("list_objects_v2")
     for pg in paginator.paginate(Bucket=ESG_BUCKET, Prefix=ESG_PREFIX):
-        ks.extend(o["Key"] for o in pg.get("Contents", []) if o["Key"].endswith(".txt"))
+        contents = pg.get("Contents", [])
+        seen_total += len(contents)
+        for o in contents:
+            key = o["Key"]
+            # ignore "folders" (S3 keys that end with '/')
+            if not key or key.endswith("/"):
+                continue
+            ks.append(key)
+
+    print(f"🔎 ESG scan under s3://{ESG_BUCKET}/{ESG_PREFIX}")
+    print(f"   Total objects seen: {seen_total}")
+    print(f"   Objects (all types) matched: {len(ks)}")
+    if not ks and seen_total > 0:
+        examples = []
+        for pg in s3.get_paginator("list_objects_v2").paginate(Bucket=ESG_BUCKET, Prefix=ESG_PREFIX):
+            for o in pg.get("Contents", []):
+                examples.append(o["Key"])
+                if len(examples) >= 10:
+                    break
+            if len(examples) >= 10:
+                break
+        print("   e.g.:")
+        for k in examples:
+            print(f"     - {k}")
     return ks
 
 
@@ -219,10 +334,11 @@ def fallback_from_filename(fname: str) -> Optional[str]:
     return None
 
 
-def download_esg_text(key: str) -> None:
-    parts = key.split("/")            # texts/{TICKER}/...
+def download_esg_text(key: str) -> Optional[Path]:
+    # expected: esg-reports/<TICKER>/<filename>
+    parts = key.split("/")
     if len(parts) < 3:
-        return
+        return None
 
     ticker = parts[1]
     company = ticker_to_company(ticker)
@@ -235,7 +351,7 @@ def download_esg_text(key: str) -> None:
                 print(f"⚡ prefix {ticker} → {company}")
                 break
 
-    # 2️⃣ token match in filename
+    # 2️⃣ token match in filename (fallback)
     if not company:
         company = fallback_from_filename(Path(key).name)
         if company:
@@ -250,22 +366,92 @@ def download_esg_text(key: str) -> None:
     dest_dir = LOCAL_TEXTS_DIR / sanitize(company) / "ESG"
     dest_dir.mkdir(parents=True, exist_ok=True)
 
-    dest = dest_dir / Path(parts[-1]).name
+    fname = safe_filename(Path(parts[-1]).name)
+    dest = dest_dir / fname
+
     if dest.exists():
-        return
+        # already downloaded this ESG artifact
+        return dest
 
     s3.download_file(ESG_BUCKET, key, str(dest))
-    print(f"✅ ESG → {dest}")
+    print(f"✅ ESG ↓ {dest}  ({key})")
+    return dest
 
 
 def process_esg_texts() -> None:
-    for key in list_esg_keys():
-        download_esg_text(key)
+    keys = list_esg_keys()
+    if not keys:
+        print(f"⚠️  No ESG files found under {ESG_PREFIX}")
+        return
+
+    for key in keys:
+        print(f"📥  ESG candidate: {key}")
+        # 1) Download the raw artifact locally
+        local_src = download_esg_text(key)
+        if not local_src:
+            continue
+
+        # derive company & names
+        parts = key.split("/")
+        ticker = parts[1].upper()
+        company = ticker_to_company(ticker) or sanitize(ticker)
+
+        # Build output txt name based on original ESG filename
+        stem = Path(local_src.name).stem
+        txt_name = f"{stem}.txt"
+
+        # Skip if already uploaded
+        if _esg_uploaded(ticker, txt_name):        # <- ticker here
+            print("✔️  Already uploaded; skip")
+            continue
+
+        # 2) Extract text
+        try:
+            cleaned = _extract_text_from_file(local_src)
+        except Exception as e:
+            print(f"❌  ESG extract failed for {local_src.name}: {e}")
+            continue
+
+        # 3) Stage to temp and upload
+        LOCAL_TMP_TXT.write_text(cleaned, encoding="utf-8", errors="replace")
+        _upload_clean_esg(LOCAL_TMP_TXT, ticker, txt_name)
+
+        # 4) Emit metadata (mimic SEC shape)
+        preview_len = 8192
+        with open(LOCAL_TMP_TXT, "rb") as fh:
+            snippet = fh.read(preview_len).decode("utf-8", "replace")
+
+        # try date from filename; fallback to current UTC date
+        date_guess = _parse_date_from_name(local_src.name) or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+        rec = {
+            "company":    company,
+            "ticker":     ticker,
+            "source":     "ESG",
+            "form":       "ESG",
+            "filingDate": date_guess,
+            "accession":  None,
+            "txt_s3_key": _esg_s3_key_for(ticker, txt_name),  # <- ticker-based key
+            "txt_bytes":  LOCAL_TMP_TXT.stat().st_size,
+            "ingest_ts":  datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+            "snippet":    snippet,
+            "stage":      "clean",
+        }
+
+        # reuse existing sender; same stream name
+        send_sec_metadata(rec, stream_name=KINESIS_STREAM)
+
+        # cleanup temp
+        LOCAL_TMP_TXT.unlink(missing_ok=True)
+
 
 # ───────────────────────── Entrypoint ─────────────────────────────
 def main() -> None:
-    print("🚀  SEC pass …")
-    process_sec_filings()
+    
+    # Temp ESG Only
+    # print("🚀  SEC pass …")
+    # process_sec_filings()
 
     print("\n🚀  ESG pass …")
     process_esg_texts()
