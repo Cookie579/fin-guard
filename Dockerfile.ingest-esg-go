@@ -16,11 +16,11 @@ RUN apt-get update && apt-get install -y golang git && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy Python and Go source files
-COPY python/ ./python/
+COPY ingest-esg-go/ ./python/
 COPY . .
 
 # Set the working directory to where your FastAPI app lives
-WORKDIR /app/python
+WORKDIR /app/ingest-esg-go
 
 # Run FastAPI app
 CMD ["uvicorn", "preprocess_kinesis:app", "--host", "0.0.0.0", "--port", "8080"]
