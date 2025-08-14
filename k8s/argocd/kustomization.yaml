@@ -1,8 +1,7 @@
 resources:
   - esg-analyzer.yaml
-  - ingest-esg-go.yaml
   - ingest-sec-go.yaml
-  - preprocess-python.yaml
+  - ingest-esg-go.yaml
   - preprocess-config.yaml
   - ghcr-creds.yaml
   - repo-creds.yaml

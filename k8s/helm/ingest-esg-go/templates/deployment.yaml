@@ -1,22 +1,22 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "preprocess-python.fullname" . }}
+  name: {{ include "ingest-esg-go.fullname" . }}
   labels:
-    app: {{ include "preprocess-python.name" . }}
+    app: {{ include "ingest-esg-go.name" . }}
 spec:
   replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
-      app: {{ include "preprocess-python.name" . }}
+      app: {{ include "ingest-esg-go.name" . }}
   template:
     metadata:
       labels:
-        app: {{ include "preprocess-python.name" . }}
+        app: {{ include "ingest-esg-go.name" . }}
     spec:
       serviceAccountName: {{ .Values.serviceAccount.name }}
       containers:
-        - name: preprocess-python
+        - name: ingest-esg-go
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:

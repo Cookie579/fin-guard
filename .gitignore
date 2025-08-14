@@ -12,6 +12,7 @@ values/*-secrets.yaml
 k8s/argocd/repo-creds.yaml
 k8s/argocd/ghcr-creds.yaml
 k8s/argocd/preprocess-config.yaml
+k8s/argocd/ingest-esg-go-config.yaml
 
 # --- Other Secrets ---
 config.json

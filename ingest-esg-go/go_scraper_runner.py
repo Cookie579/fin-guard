@@ -2,14 +2,14 @@ import subprocess
 import pathlib
 
 SCRAPER_PATHS = [
-    "python/preprocessing-esg/main.go",
-    "python/preprocessing-esg/domain_search.go",
-    "python/preprocessing-esg/domain.go",
-    "python/preprocessing-esg/serper.go",
-    "python/preprocessing-esg/models.go",
-    "python/preprocessing-esg/s3.go",
-    "python/preprocessing-esg/kinesis.go",
-    "python/preprocessing-esg/downloader.go",
+    "ingest-esg-go/utils/main.go",
+    "ingest-esg-go/utils/domain_search.go",
+    "ingest-esg-go/utils/domain.go",
+    "ingest-esg-go/utils/serper.go",
+    "ingest-esg-go/utils/models.go",
+    "ingest-esg-go/utils/s3.go",
+    "ingest-esg-go/utils/kinesis.go",
+    "ingest-esg-go/utils/downloader.go",
 ]
 
 PROJECT_ROOT = pathlib.Path("/app")
