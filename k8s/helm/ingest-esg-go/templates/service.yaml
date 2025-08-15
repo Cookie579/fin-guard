@@ -2,10 +2,16 @@ apiVersion: v1
 kind: Service
 metadata:
   name: {{ include "ingest-esg-go.fullname" . }}
+  labels:
+    app.kubernetes.io/name: {{ include "ingest-esg-go.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
 spec:
-  type: ClusterIP
+  type: {{ .Values.service.type }}
   selector:
-    app: {{ include "ingest-esg-go.name" . }}
+    app.kubernetes.io/name: {{ include "ingest-esg-go.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
   ports:
-    - port: 8080
+    - name: http
+      port: {{ .Values.service.port }}
       targetPort: 8080
+      protocol: TCP
