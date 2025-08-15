@@ -3,25 +3,40 @@ kind: Deployment
 metadata:
   name: {{ include "ingest-esg-go.fullname" . }}
   labels:
-    app: {{ include "ingest-esg-go.name" . }}
+    app.kubernetes.io/name: {{ include "ingest-esg-go.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
 spec:
   replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
-      app: {{ include "ingest-esg-go.name" . }}
+      app.kubernetes.io/name: {{ include "ingest-esg-go.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
   template:
     metadata:
       labels:
-        app: {{ include "ingest-esg-go.name" . }}
+        app.kubernetes.io/name: {{ include "ingest-esg-go.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
     spec:
       serviceAccountName: {{ .Values.serviceAccount.name }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
-        - name: ingest-esg-go
+        - name: {{ include "ingest-esg-go.name" . }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - containerPort: 8080
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.extraVolumeMounts }}
           volumeMounts:
-            {{- toYaml .Values.extraVolumeMounts | nindent 12 }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.extraVolumes }}
       volumes:
-        {{- toYaml .Values.extraVolumes | nindent 8 }}
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

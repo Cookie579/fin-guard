@@ -1,5 +1,4 @@
 resources:
-  - esg-analyzer.yaml
   - ingest-sec-go.yaml
   - ingest-esg-go.yaml
   - preprocess-config.yaml
