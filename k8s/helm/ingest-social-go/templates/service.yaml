@@ -1,15 +1,13 @@
-{{- if .Values.service.enabled }}
 apiVersion: v1
 kind: Service
 metadata:
   name: {{ include "ingest-social-go.fullname" . }}
 spec:
+  type: ClusterIP
   selector:
     app.kubernetes.io/name: {{ include "ingest-social-go.name" . }}
     app.kubernetes.io/instance: {{ .Release.Name }}
-  type: {{ .Values.service.type }}
   ports:
     - name: http
-      port: {{ .Values.service.port }}
-      targetPort: {{ .Values.service.port }}
-{{- end }}
+      port: 8081
+      targetPort: 8081
