@@ -1,32 +1,31 @@
-# ── Build Go Binary ───────────────────────────────
-FROM golang:1.24.4-alpine AS gobuild
-WORKDIR /app
+# ── Build Go binary ─────────────────────────────────────────────
+FROM golang:1.22-alpine AS gobuild
+WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-WORKDIR /app/ingest-social-go
+WORKDIR /src/ingest-social-go
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o ingest-social-go .
 
-# ── Runtime: FastAPI + Go runner in ONE image ────
+# ── Runtime: Python + Uvicorn orchestrator + Go binary ─────────
 FROM python:3.12-slim
 
 WORKDIR /app
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 
-# TLS for HTTPS calls (AWS, YouTube, etc.)
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
- && rm -rf /var/lib/apt/lists/*
+# TLS and basics
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
 
-# FastAPI + k8s client
-RUN pip install --no-cache-dir fastapi uvicorn kubernetes
+# FastAPI deps (or use requirements.txt if you have one)
+RUN pip install --no-cache-dir fastapi uvicorn
 
-# ⬅⬅⬅ FIXED: copy the orchestrator from its actual location in the repo
+# Orchestrator
 COPY ingest-social-go/orchestrator.py /app/orchestrator.py
 
-# Go runner binary
-COPY --from=gobuild /app/ingest-social-go/ingest-social-go /usr/local/bin/ingest-social-go
+# Go runner
+COPY --from=gobuild /src/ingest-social-go/ingest-social-go /app/ingest-social-go
+RUN chmod +x /app/ingest-social-go
 
-# Default: run FastAPI (your Deployment will use this).
-# Jobs will override the command to run the Go runner.
+# Serve FastAPI by default
 EXPOSE 8081
 ENTRYPOINT ["python","-m","uvicorn","orchestrator:app","--host","0.0.0.0","--port","8081"]
