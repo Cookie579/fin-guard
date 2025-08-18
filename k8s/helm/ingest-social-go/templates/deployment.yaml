@@ -1,3 +1,4 @@
+# k8s/helm/ingest-social-go/templates/deployment.yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -24,20 +25,9 @@ spec:
         - name: app
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          # RUN FASTAPI in this Deployment:
-          command: ["python"]
-          args: ["-m","uvicorn","orchestrator:app","--host","0.0.0.0","--port","8081"]
-          ports:
-            - name: http
-              containerPort: 8081
-          readinessProbe:
-            httpGet: { path: /docs, port: 8081 }
-            initialDelaySeconds: 3
-            periodSeconds: 5
-          livenessProbe:
-            httpGet: { path: /docs, port: 8081 }
-            initialDelaySeconds: 10
-            periodSeconds: 10
+          command: ["/usr/local/bin/ingest-social-go"]
+          args: []   # add flags here if your app expects any
+          # remove HTTP probes (no web server)
           {{- with .Values.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -50,4 +40,3 @@ spec:
       volumes:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-
