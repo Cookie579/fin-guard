@@ -1,5 +1,5 @@
-//go:build youtube
-// +build youtube
+//go:build ignore
+// +build ignore
 
 // ingest-social-go/youtube.go
 //

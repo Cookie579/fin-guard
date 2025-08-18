@@ -1,11 +1,11 @@
-name: Build & Push ESG Analyzer
+name: Build & Push Ingest Social Go
 
 on:
   push:
     paths:
-      - "Dockerfile"
-      - "requirements.txt"
-      - ".github/workflows/esg-analyzer.yml"
+      - "ingest-social-go/**"
+      - "Dockerfile.ingest-social-go"
+      - ".github/workflows/ingest-social-go.yml"
 
 jobs:
   build:
@@ -23,9 +23,9 @@ jobs:
       - uses: docker/build-push-action@v5
         with:
           context: .
-          file: Dockerfile
+          file: Dockerfile.ingest-social-go
           push: true
           tags: |
-            ghcr.io/cookie579/esg-analyzer:latest
-            ghcr.io/cookie579/esg-analyzer:${{ github.sha }}
-            ghcr.io/cookie579/esg-analyzer:${{ github.ref_name }}
+            ghcr.io/cookie579/ingest-social-go:latest
+            ghcr.io/cookie579/ingest-social-go:${{ github.sha }}
+            ghcr.io/cookie579/ingest-social-go:${{ github.ref_name }}

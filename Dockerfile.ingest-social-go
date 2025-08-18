@@ -1,0 +1,36 @@
+# ────────────────────────────────
+# Stage 1: Build
+# ────────────────────────────────
+FROM golang:1.24.4-alpine AS builder
+WORKDIR /app
+
+# Root-level module files (single module)
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy whole repo (monorepo layout)
+COPY . .
+
+# Build the service
+WORKDIR /app/ingest-social-go
+# If you ever need build tags (e.g., "reddit"), uncomment:
+# ARG BUILD_TAGS=
+# RUN go build -tags "${BUILD_TAGS}" -o ingest-social-go .
+RUN go build -o ingest-social-go .
+
+# ────────────────────────────────
+# Stage 2: Runtime (minimal)
+# ────────────────────────────────
+FROM alpine:latest
+WORKDIR /root/
+
+# CA certs are needed for HTTPS calls (YouTube/StockTwits/Reddit)
+RUN apk add --no-cache ca-certificates tzdata
+
+# Copy compiled binary
+COPY --from=builder /app/ingest-social-go/ingest-social-go .
+
+# If you mount a Secret as /app/config.json in k8s, your app can read it via:
+# ENV CONFIG_JSON=/app/config.json
+
+ENTRYPOINT ["./ingest-social-go"]

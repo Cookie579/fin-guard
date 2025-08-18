@@ -1,0 +1,34 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/cookie579/ingest-social-go
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# Optional Service (usually not needed for a headless collector)
+service:
+  enabled: false
+  type: ClusterIP
+  port: 8080
+
+# If you ever need a registry secret (e.g., GHCR), leave as-is or comment out for ECR
+imagePullSecrets: []
+
+# Re-use the SAME SA & IRSA role as ingest-esg-go
+serviceAccount:
+  name: preprocess-python-sa
+  roleArn: arn:aws:iam::084071638445:role/preprocess-irsa-role
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::084071638445:role/preprocess-irsa-role
+resources: {}
+
+# Mount the same config.json Secret used by ingest-esg-go
+extraVolumes:
+  - name: config-volume
+    secret:
+      secretName: preprocess-config
+
+extraVolumeMounts:
+  - name: config-volume
+    mountPath: /app/config.json
+    subPath: config.json

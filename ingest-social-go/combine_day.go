@@ -1,5 +1,5 @@
-//go:build combine
-// +build combine
+//go:build ignore
+// +build ignore
 
 // combine_day.go
 //

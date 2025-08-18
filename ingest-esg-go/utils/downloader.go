@@ -14,8 +14,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Cookie579/fin-guard/ingest-esg-go/utils"
-
 	// AWS SDK v1
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
@@ -78,7 +76,7 @@ func download() {
 	// 2) Load & dedupe to latest per ticker by ingest_ts
 	tickerLatest := make(map[string]DomainFile)
 	for _, key := range domainKeys {
-		jb, err := utils.LoadJSONFromS3(bucket, key)
+		jb, err := LoadJSONFromS3(bucket, key)
 		if err != nil {
 			log.Printf("⚠️  Skipping domain file %s: load error: %v", key, err)
 			continue
@@ -128,7 +126,7 @@ func download() {
 		go func(workerID int) {
 			defer wg.Done()
 			for t := range tasksCh {
-				jb, err := utils.LoadJSONFromS3(bucket, t.Key)
+				jb, err := LoadJSONFromS3(bucket, t.Key)
 				if err != nil {
 					log.Printf("❌ [%d] %s: load error for %s: %v", workerID, t.Ticker, t.Key, err)
 					continue

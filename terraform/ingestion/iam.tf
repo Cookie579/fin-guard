@@ -67,6 +67,34 @@ data "aws_iam_policy_document" "preprocess_access" {
     ]
     resources = [data.aws_kinesis_stream.reference.arn]
   }
+
+  ########################################
+  # 4. DynamoDB access for ingest-social-go
+  ########################################
+  statement {
+    sid    = "DdbAccessForSocial"
+    effect = "Allow"
+    actions = [
+      "dynamodb:GetItem",
+      "dynamodb:PutItem",
+      "dynamodb:UpdateItem",
+      "dynamodb:DeleteItem",
+      "dynamodb:ConditionCheckItem",
+      "dynamodb:DescribeTable"
+      # If you will query tables/GSIs, also add:
+      # "dynamodb:Query"
+      # If you use batch ops, add:
+      # "dynamodb:BatchGetItem",
+      # "dynamodb:BatchWriteItem"
+    ]
+    resources = [
+      "arn:aws:dynamodb:us-east-1:084071638445:table/social_state",
+      "arn:aws:dynamodb:us-east-1:084071638445:table/social_locks",
+      "arn:aws:dynamodb:us-east-1:084071638445:table/social_youtube_video_ids",
+      "arn:aws:dynamodb:us-east-1:084071638445:table/social_youtube_video_ids/index/gsi_video_id"
+    ]
+  }
+
 }
 
 resource "aws_iam_policy" "preprocess_policy" {
