@@ -1,17 +1,48 @@
 # ── Build ─────────────────────────────────────────
+#
+# This multi-stage Dockerfile builds and packages the ingest-social-go
+# collector for deployment into Kubernetes. The first stage fetches
+# dependencies and compiles the Go binary. The second stage produces a
+# minimal runtime image containing only the compiled binary and system
+# certificates. The config.json secret will be mounted into the
+# container at /app/config.json by the Job orchestrator. The binary
+# uses loadConfigBytes() to locate the config in /app, ./, or ../.
+
 FROM golang:1.24.4-alpine AS builder
+
 WORKDIR /app
+
+# Copy go.mod and go.sum first to take advantage of Docker layer
+# caching when dependencies change infrequently.
 COPY go.mod go.sum ./
 RUN go mod download
 
+# Copy the source tree into the builder. This includes the
+# ingest-social-go program and any other packages required to build it.
 COPY . .
+
+# Change into the ingest-social-go directory and build the binary. We
+# disable CGO to produce a statically linked binary that runs in
+# scratch/alpine environments without glibc.
 WORKDIR /app/ingest-social-go
 RUN CGO_ENABLED=0 go build -o ingest-social-go .
 
 # ── Runtime ───────────────────────────────────────
+
 FROM alpine:latest
+
+# Install CA certificates so the Go HTTP client trusts public TLS
+# endpoints (e.g. Kinesis, DynamoDB, YouTube).
 RUN apk add --no-cache ca-certificates
+
+# The binary will run from /root by default. We mount the config at
+# /app/config.json in the Kubernetes Job; it is not copied here.
 WORKDIR /root/
+
+# Copy the compiled binary from the builder stage. We do not copy
+# anything else to keep the runtime image slim.
 COPY --from=builder /app/ingest-social-go/ingest-social-go .
-# config is mounted at /app/config.json by the Job
+
+# Entrypoint runs the collector binary. Arguments are provided via
+# the Kubernetes Job manifest (e.g. stocktwits or youtube subcommands).
 ENTRYPOINT ["./ingest-social-go"]

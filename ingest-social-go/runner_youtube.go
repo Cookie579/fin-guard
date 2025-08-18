@@ -94,14 +94,15 @@ func RunYouTubeJob(ctx context.Context, cfg *config.Config, jobID, ingestDate st
         }
     }()
     defer hbCancel()
-    // Read YouTube API keys
-    ytKeys, err := readYouTubeAPIKeys()
-    if err != nil || len(ytKeys) == 0 {
-        err := fmt.Errorf("no YouTube API keys found in config.json")
+    // Read a single YouTube API key from the flat config. The key can be
+    // provided as google_api_key or the first entry in google_api_keys. An
+    // error indicates that no valid key could be found.
+    ytKey, err := getYouTubeAPIKey()
+    if err != nil {
+        err := fmt.Errorf("youtube: %w", err)
         emitMeta("job_failed", map[string]any{"reason": err.Error()})
         return err
     }
-    keyIdx := 0
     client := &http.Client{Timeout: 45 * time.Second}
     // Load state (last search time) – currently unused beyond logging
     _, err = store.GetYouTubeState(ctx, ticker)
@@ -138,8 +139,8 @@ func RunYouTubeJob(ctx context.Context, cfg *config.Config, jobID, ingestDate st
             if pageToken != "" {
                 params.Set("pageToken", pageToken)
             }
-            params.Set("key", ytKeys[keyIdx%len(ytKeys)])
-            keyIdx++
+            // Use the resolved YouTube API key for all requests
+            params.Set("key", ytKey)
             searchURL := fmt.Sprintf("https://youtube.googleapis.com/youtube/v3/search?%s", params.Encode())
             req, _ := http.NewRequestWithContext(ctx, http.MethodGet, searchURL, nil)
             req.Header.Set("User-Agent", "ingest-social-go/1.0")
@@ -193,13 +194,13 @@ func RunYouTubeJob(ctx context.Context, cfg *config.Config, jobID, ingestDate st
                     // Duplicate – skip processing
                     continue
                 }
-                // Fetch video metadata
-                if err := fetchAndEmitVideoMeta(ctx, client, pub, ytKeys, &keyIdx, ticker, source, jobID, ingestDate, vid); err != nil {
+                // Fetch video metadata using the resolved API key
+                if err := fetchAndEmitVideoMeta(ctx, client, pub, ytKey, ticker, source, jobID, ingestDate, vid); err != nil {
                     emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("meta: %v", err)})
                     return err
                 }
-                // Fetch and emit comments
-                if err := fetchAndEmitVideoComments(ctx, client, pub, ytKeys, &keyIdx, ticker, source, jobID, ingestDate, vid, args.ExtraPages, args.DelayMS); err != nil {
+                // Fetch and emit comments using the same API key
+                if err := fetchAndEmitVideoComments(ctx, client, pub, ytKey, ticker, source, jobID, ingestDate, vid, args.ExtraPages, args.DelayMS); err != nil {
                     emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("comments: %v", err)})
                     return err
                 }
@@ -291,13 +292,16 @@ func readYouTubeAPIKeys() ([]string, error) {
 // Data API and publishes a youtube_video_meta record. It may update the
 // discovered year in the DynamoDB table by calling InsertYouTubeVideoID
 // again if the actual published year differs from the provisional year.
-func fetchAndEmitVideoMeta(ctx context.Context, client *http.Client, pub *KinesisPublisher, keys []string, keyIdx *int, ticker, source, jobID, ingestDate, vid string) error {
+// fetchAndEmitVideoMeta retrieves a video's metadata using the YouTube
+// Data API and publishes a youtube_video_meta record. It takes a single
+// API key rather than a slice and index; callers should supply the key
+// returned by getYouTubeAPIKey().
+func fetchAndEmitVideoMeta(ctx context.Context, client *http.Client, pub *KinesisPublisher, apiKey string, ticker, source, jobID, ingestDate, vid string) error {
     // Build URL for videos.list
     params := url.Values{}
     params.Set("part", "snippet,contentDetails,statistics")
     params.Set("id", vid)
-    params.Set("key", keys[*keyIdx%len(keys)])
-    (*keyIdx)++
+    params.Set("key", apiKey)
     urlStr := fmt.Sprintf("https://youtube.googleapis.com/youtube/v3/videos?%s", params.Encode())
     req, _ := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
     req.Header.Set("User-Agent", "ingest-social-go/1.0")
@@ -373,7 +377,10 @@ func fetchAndEmitVideoMeta(ctx context.Context, client *http.Client, pub *Kinesi
 // every comment thread retrieved. Delay between calls is controlled by
 // delayMs. extraPages = -1 means all available pages; 0 means no extra
 // pages; positive values specify how many pages beyond the first to fetch.
-func fetchAndEmitVideoComments(ctx context.Context, client *http.Client, pub *KinesisPublisher, keys []string, keyIdx *int, ticker, source, jobID, ingestDate, vid string, extraPages int, delayMs int) error {
+// fetchAndEmitVideoComments retrieves YouTube comments for a video and
+// publishes a youtube_comment record for each top-level comment. It uses a
+// single YouTube API key rather than rotating through a slice.
+func fetchAndEmitVideoComments(ctx context.Context, client *http.Client, pub *KinesisPublisher, apiKey string, ticker, source, jobID, ingestDate, vid string, extraPages int, delayMs int) error {
     pageToken := ""
     pagesFetched := 0
     for {
@@ -398,8 +405,7 @@ func fetchAndEmitVideoComments(ctx context.Context, client *http.Client, pub *Ki
         if pageToken != "" {
             params.Set("pageToken", pageToken)
         }
-        params.Set("key", keys[*keyIdx%len(keys)])
-        (*keyIdx)++
+        params.Set("key", apiKey)
         urlStr := fmt.Sprintf("https://youtube.googleapis.com/youtube/v3/commentThreads?%s", params.Encode())
         req, _ := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
         req.Header.Set("User-Agent", "ingest-social-go/1.0")

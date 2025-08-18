@@ -115,19 +115,18 @@ func RunStocktwitsJob(ctx context.Context, cfg *config.Config, jobID, ingestDate
     if args.SinceID > 0 {
         latestID = args.SinceID
     }
-    // Determine API keys to use. Attempt to find keys in config.json. If
-    // none are present the job cannot proceed and fails. See readAPIKeys
-    // below for details on how keys are discovered.
-    rapidKeys, err := readRapidAPIKeys()
-    if err != nil || len(rapidKeys) == 0 {
-        err := fmt.Errorf("no RapidAPI keys found in config.json")
+    // Determine RapidAPI host and key using the flat config loader. If no
+    // keys are available the job cannot proceed. Host will default to
+    // DefaultRapidAPIHost if rapidapi_host is not set in config.json.
+    host, apiKey, err := getRapidAPIHostAndKey()
+    if err != nil {
+        err = fmt.Errorf("stocktwits: %w", err)
         emitMeta("job_failed", map[string]any{"reason": err.Error()})
         return err
     }
-    keyIdx := 0
     client := &http.Client{Timeout: 45 * time.Second}
-    // Build base URL for StockTwits API
-    baseURL := "https://stocktwits.p.rapidapi.com"
+    // Build base URL for StockTwits API using the resolved host
+    baseURL := fmt.Sprintf("https://%s", host)
     // Track number of processed records to emit batch_committed events
     var processedCount int
     // Record the start time to compute job duration on completion
@@ -155,12 +154,11 @@ func RunStocktwitsJob(ctx context.Context, cfg *config.Config, jobID, ingestDate
         if len(v) > 0 {
             reqURL += "?" + v.Encode()
         }
-        // Create and send request using the current API key
+        // Create and send request using the resolved RapidAPI host and key
         req, _ := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-        req.Header.Set("X-RapidAPI-Host", "stocktwits.p.rapidapi.com")
-        req.Header.Set("X-RapidAPI-Key", rapidKeys[keyIdx%len(rapidKeys)])
+        req.Header.Set("X-RapidAPI-Host", host)
+        req.Header.Set("X-RapidAPI-Key", apiKey)
         req.Header.Set("User-Agent", "ingest-social-go/1.0")
-        keyIdx++
         resp, err := client.Do(req)
         if err != nil {
             emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("HTTP error: %v", err)})
