@@ -1,29 +1,23 @@
-# Runtime base with Python
 FROM python:3.12-slim
 
-# --- Install Go 1.24 (inside the container) ---
-# We install a modern Go; Debian's golang pkg is often old.
 ARG GO_VERSION=1.24.4
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates bash \
  && curl -fsSL https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz -o /tmp/go.tgz \
  && rm -rf /usr/local/go && tar -C /usr/local -xzf /tmp/go.tgz \
  && rm -f /tmp/go.tgz \
  && apt-get purge -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+
 ENV PATH="/usr/local/go/bin:${PATH}" \
     GOTOOLCHAIN=auto \
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
 
-# --- Python deps (or use your own requirements.txt) ---
-RUN pip install --no-cache-dir fastapi uvicorn
+# ⬅ include kubernetes here
+RUN pip install --no-cache-dir fastapi uvicorn kubernetes
 
 WORKDIR /app
-
-# Copy the whole repo (adjust if you prefer a narrower context)
-# Important: your go.mod/go.sum should be at repo root (or fix paths below).
 COPY . .
-
-# A tiny bootstrap that compiles the Go binary (once) then starts uvicorn
 COPY ingest-social-go/bootstrap.sh /app/bootstrap.sh
 RUN chmod +x /app/bootstrap.sh
 

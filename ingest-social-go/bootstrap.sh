@@ -1,18 +1,33 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 1) Build the Go binary if missing (fast repeat runs reuse the binary)
-cd /app
-mkdir -p /app/bin
+APP_ROOT="/app"
+GO_MAIN_DIR="${APP_ROOT}/ingest-social-go"
+BIN_DIR="${APP_ROOT}/bin"
+BIN_PATH="${BIN_DIR}/ingest-social-go"
 
-# If your module root is repo root and package main is under ingest-social-go:
-if [[ ! -x /app/bin/ingest-social-go ]]; then
-  echo "🔧 Building Go binary (CGO_DISABLED)…"
+echo "🔎 Go version: $(/usr/local/go/bin/go version || echo 'go not found')"
+echo "📂 App dir: ${GO_MAIN_DIR}"
+
+mkdir -p "${BIN_DIR}"
+
+# Build only if missing or empty
+if [[ ! -s "${BIN_PATH}" ]]; then
+  echo "🔧 Building Go runner..."
   export CGO_ENABLED=0
-  /usr/local/go/bin/go build -trimpath -ldflags "-s -w" -o /app/bin/ingest-social-go ./ingest-social-go
-  echo "✅ Built /app/bin/ingest-social-go"
+  export GOTOOLCHAIN=auto
+  cd "${APP_ROOT}"
+  /usr/local/go/bin/go build -trimpath -ldflags "-s -w" \
+    -o "${BIN_PATH}" ./ingest-social-go
+  echo "✅ Built ${BIN_PATH}"
 fi
 
-# 2) Start the FastAPI orchestrator (same pattern as ingest-esg-go)
-echo "🚀 Starting orchestrator (uvicorn)…"
-exec python -m uvicorn orchestrator:app --host 0.0.0.0 --port 8081
+# Sanity checks (helpful when debugging)
+if [[ ! -f "${GO_MAIN_DIR}/orchestrator.py" ]]; then
+  echo "❌ Missing ${GO_MAIN_DIR}/orchestrator.py"; exit 1
+fi
+
+echo "🚀 Starting orchestrator on :8081 ..."
+exec python -m uvicorn orchestrator:app \
+  --host 0.0.0.0 --port 8081 \
+  --app-dir "${GO_MAIN_DIR}"

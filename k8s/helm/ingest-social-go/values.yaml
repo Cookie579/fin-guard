@@ -1,28 +1,21 @@
+image:
+  repository: ghcr.io/cookie579/ingest-social-go   # orchestrator image
+  tag: latest                                      # recommend pinning to a version later
+  pullPolicy: Always
+
+serviceAccount:
+  name: ingest-social-go                           # orchestrator SA (has RBAC)
+
+runner:
+  image: ghcr.io/cookie579/ingest-social-go:latest # runner image for Jobs
+  serviceAccountName: ingest-social-go             # or a dedicated SA with IRSA
+  imagePullSecret: ghcr-creds
+
+aws:
+  region: us-east-1
+
 replicaCount: 1
 
-image:
-  repository: ghcr.io/cookie579/ingest-social-go
-  tag: latest
-  pullPolicy: IfNotPresent
-
-# Optional Service (usually not needed for a headless collector)
-service:
-  enabled: false
-  type: ClusterIP
-  port: 8080
-
-# If you ever need a registry secret (e.g., GHCR), leave as-is or comment out for ECR
-imagePullSecrets:
-  - ghcr-creds
-
-
-# Re-use the SAME SA & IRSA role as ingest-esg-go
-serviceAccount:
-  name: preprocess-python-sa
-  roleArn: arn:aws:iam::084071638445:role/preprocess-irsa-role
-  annotations:
-    eks.amazonaws.com/role-arn: arn:aws:iam::084071638445:role/preprocess-irsa-role
-resources: {}
 
 # Mount the same config.json Secret used by ingest-esg-go
 extraVolumes:

@@ -5,17 +5,21 @@ metadata:
   labels:
     app.kubernetes.io/name: {{ include "ingest-social-go.name" . }}
     app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: orchestrator
 spec:
-  replicas: {{ .Values.replicaCount }}
+  replicas: {{ .Values.replicaCount | default 1 }}
+  revisionHistoryLimit: 3
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "ingest-social-go.name" . }}
       app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: orchestrator
   template:
     metadata:
       labels:
         app.kubernetes.io/name: {{ include "ingest-social-go.name" . }}
         app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: orchestrator
     spec:
       serviceAccountName: {{ .Values.serviceAccount.name }}
       imagePullSecrets:
@@ -23,20 +27,37 @@ spec:
       containers:
         - name: app
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
-          # RUN FASTAPI in this Deployment:
-
+          imagePullPolicy: {{ .Values.image.pullPolicy | default "IfNotPresent" }}
+          # No command/args here — let Dockerfile ENTRYPOINT run bootstrap.sh (Uvicorn).
           ports:
             - name: http
               containerPort: 8081
+          env:
+            # These are read by k8s_launcher.py inside the orchestrator
+            - name: RUNNER_IMAGE
+              value: {{ .Values.runner.image | default "ghcr.io/cookie579/ingest-social-go:latest" | quote }}
+            - name: RUNNER_SERVICEACCOUNT
+              value: {{ .Values.runner.serviceAccountName | default .Values.serviceAccount.name | quote }}
+            - name: IMAGE_PULL_SECRET
+              value: {{ .Values.runner.imagePullSecret | default "ghcr-creds" | quote }}
+            - name: AWS_REGION
+              value: {{ .Values.aws.region | default "us-east-1" | quote }}
+            # Optional: pass through any other config your Jobs need (streams/buckets/etc.)
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           readinessProbe:
-            httpGet: { path: /docs, port: 8081 }
-            initialDelaySeconds: 3
+            httpGet: { path: /, port: 8081 }
+            initialDelaySeconds: 5
             periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 6
           livenessProbe:
-            httpGet: { path: /docs, port: 8081 }
+            httpGet: { path: /, port: 8081 }
             initialDelaySeconds: 10
             periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
           {{- with .Values.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -49,4 +70,9 @@ spec:
       volumes:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-
+      # (Optional) Hardening — uncomment if you want to run as non-root
+      # securityContext:
+      #   runAsNonRoot: true
+      #   runAsUser: 1000
+      #   runAsGroup: 1000
+      #   fsGroup: 1000
