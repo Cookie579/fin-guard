@@ -11,8 +11,7 @@ import (
     "strconv"
     "strings"
     "time"
-    "os"
-
+    "errors"
     "github.com/Cookie579/fin-guard/config"
 )
 
@@ -23,6 +22,8 @@ import (
 // and graceful termination in response to context cancellation. On error
 // the job will emit a job_failed event before returning the error.
 func RunStocktwitsJob(ctx context.Context, cfg *config.Config, jobID, ingestDate string, args *stocktwitsArgs) error {
+    // Suppress unused import warning for cfg; API keys are read via loadConfigBytes().
+    _ = cfg
     ticker := strings.ToUpper(args.Ticker)
     source := "stocktwits"
     ownerID := jobID
@@ -41,9 +42,11 @@ func RunStocktwitsJob(ctx context.Context, cfg *config.Config, jobID, ingestDate
     }()
     // Helper to emit a metadata event. Metadata events are emitted to
     // Kinesis using a synthetic row key. They include the ingest date and
-    // current timestamp.
+    // current timestamp. Each metadata record is tagged with StageEvents
+    // so that control-plane events are partitioned separately from raw data.
     emitMeta := func(eventType string, extra map[string]any) {
         rec := map[string]any{
+            "stage":  StageEvents,
             "type":   eventType,
             "source": source,
             "ticker": ticker,
@@ -62,15 +65,46 @@ func RunStocktwitsJob(ctx context.Context, cfg *config.Config, jobID, ingestDate
     }
     // Emit job_started event immediately
     emitMeta("job_started", map[string]any{})
-    // Acquire lock
+    // Attempt to acquire the lock. If the lock is not acquired because
+    // another job is active, return immediately without emitting a job_failed
+    // event. CLI will exit with status code 2 in this case. For other
+    // errors we emit a job_failed event.
     if err := store.AcquireLock(ctx, source, ticker, ownerID, jobID); err != nil {
+        if errors.Is(err, ErrLockNotAcquired) {
+            return err
+        }
         emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("lock: %v", err)})
         return err
     }
+    // Print a marker to stdout indicating the lock has been acquired. Use
+    // <source#TICKER> as the primary key format. Keep source lower-case
+    // and ticker upper-case to match the pk.
+    fmt.Printf("LOCK_ACQUIRED job_id=%s pk=%s#%s\n", jobID, source, strings.ToUpper(ticker))
     defer func() {
         // Always release the lock on exit
         _ = store.ReleaseLock(context.Background(), source, ticker, ownerID)
     }()
+
+    // Start a heartbeat goroutine to extend the lock periodically. It stops
+    // when the job context is cancelled or returns. Errors are logged but
+    // do not terminate the job immediately; a subsequent operation may
+    // detect the lost lock.
+    hbCtx, hbCancel := context.WithCancel(ctx)
+    go func() {
+        t := time.NewTicker(time.Duration(LockHeartbeatSeconds) * time.Second)
+        defer t.Stop()
+        for {
+            select {
+            case <-hbCtx.Done():
+                return
+            case <-t.C:
+                if err := store.HeartbeatLock(ctx, source, ticker, ownerID); err != nil {
+                    log.Printf("WARN: heartbeat failed for %s: %v", ticker, err)
+                }
+            }
+        }
+    }()
+    defer hbCancel()
     // Load state from DDB
     latestID, _, err := store.GetStocktwitsState(ctx, ticker)
     if err != nil {
@@ -192,19 +226,20 @@ func RunStocktwitsJob(ctx context.Context, cfg *config.Config, jobID, ingestDate
             // Sentiment is optional
             sentiment := msg.Entities.Sentiment.Basic
             rec := map[string]any{
-                "type":         "stocktwits_message",
-                "source":       source,
-                "ticker":       ticker,
-                "ingest_date":  ingestDate,
-                "job_id":       jobID,
-                "message_id":   msg.ID,
-                "created_at":   msg.CreatedAt,
-                "text":         msg.Body,
-                "symbols":      syms,
-                "sentiment":    sentiment,
-                "likes":        msg.Likes.Total,
-                "reshares":     msg.Reshares.ResharedCount,
-                "user_id":      msg.User.ID,
+                "stage":         StageRaw,
+                "type":          "stocktwits_message",
+                "source":        source,
+                "ticker":        ticker,
+                "ingest_date":   ingestDate,
+                "job_id":        jobID,
+                "message_id":    msg.ID,
+                "created_at":    msg.CreatedAt,
+                "text":          msg.Body,
+                "symbols":       syms,
+                "sentiment":     sentiment,
+                "likes":         msg.Likes.Total,
+                "reshares":      msg.Reshares.ResharedCount,
+                "user_id":       msg.User.ID,
                 "user_username": msg.User.Username,
             }
             rowKey := strconv.FormatInt(msg.ID, 10)
@@ -238,8 +273,10 @@ func RunStocktwitsJob(ctx context.Context, cfg *config.Config, jobID, ingestDate
 // returned slice will be empty. An error is only returned if the file
 // cannot be read or parsed.
 func readRapidAPIKeys() ([]string, error) {
-    path := "../config.json"
-    b, err := os.ReadFile(path)
+    // Load configuration from the first available config.json path. This
+    // helper tries /app/config.json, ./config.json and ../config.json in
+    // that order and returns an error if none are found.
+    b, err := loadConfigBytes()
     if err != nil {
         return nil, err
     }

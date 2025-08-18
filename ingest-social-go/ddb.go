@@ -21,6 +21,13 @@ type DynamoStore struct {
     client *dynamodb.Client
 }
 
+// ErrLockNotAcquired is returned by AcquireLock when another worker
+// currently holds the lock for the requested source/ticker pair. Callers
+// should treat this as a non-fatal condition and exit with status code 2
+// without retrying. The returned error may wrap this sentinel to provide
+// additional context.
+var ErrLockNotAcquired = errors.New("lock not acquired")
+
 // NewDynamoStore instantiates a new DynamoStore bound to the configured
 // AWS region. The underlying client uses the default credential chain.
 func NewDynamoStore(ctx context.Context) (*DynamoStore, error) {
@@ -61,7 +68,9 @@ func (s *DynamoStore) AcquireLock(ctx context.Context, source, ticker, ownerID, 
     if err != nil {
         var ccfe *types.ConditionalCheckFailedException
         if errors.As(err, &ccfe) {
-            return fmt.Errorf("lock already held for %s: %w", pk, err)
+            // Another worker holds the lock. Return the sentinel so callers
+            // can exit gracefully. Wrap the sentinel to preserve context.
+            return fmt.Errorf("lock already held for %s: %w", pk, ErrLockNotAcquired)
         }
         return err
     }
@@ -229,7 +238,11 @@ func (s *DynamoStore) UpdateYouTubeState(ctx context.Context, ticker string) err
 // exists the method returns false with no error. Additional attributes
 // include ticker, year, discovered_at, optional published_at and channel_id,
 // and discovered_by_job_id. Times are formatted using RFC3339.
-func (s *DynamoStore) InsertYouTubeVideoID(ctx context.Context, ticker, videoID string, year int, discoveredAt time.Time, publishedAt *time.Time, channelID string, discoveredByJobID string) (bool, error) {
+//
+// Note: The argument order is (ticker, year, videoID, discoveredAt,
+// publishedAt, channelID, discoveredByJobID). This allows callers to
+// naturally specify the partitioning year immediately after the ticker.
+func (s *DynamoStore) InsertYouTubeVideoID(ctx context.Context, ticker string, year int, videoID string, discoveredAt time.Time, publishedAt *time.Time, channelID string, discoveredByJobID string) (bool, error) {
     pky := fmt.Sprintf("%s#%d", strings.ToUpper(ticker), year)
     item := map[string]types.AttributeValue{
         "pky":                   &types.AttributeValueMemberS{Value: pky},

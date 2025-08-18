@@ -80,4 +80,17 @@ const (
     // YtDefaultCommentPageSize is the default number of comments returned
     // per comment threads API call. The YouTube Data API caps this at 100.
     YtDefaultCommentPageSize = 100
+
+    // StageRaw indicates that a record belongs to the RAW data stage. All
+    // comment, message and video metadata records emitted by this collector
+    // should include this value in their "stage" field. It allows the data
+    // lake to partition raw records separately from control plane events.
+    StageRaw = "RAW"
+
+    // StageEvents indicates that a record is a control-plane event (job
+    // lifecycle or batch progress). Metadata events emitted by the runners
+    // should include this value in their "stage" field so that they can be
+    // routed to a separate stage prefix in S3. If you prefer to keep
+    // events in RAW alongside data records, set StageEvents = StageRaw.
+    StageEvents = "EVENTS"
 )

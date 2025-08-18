@@ -11,8 +11,7 @@ import (
     "strconv"
     "strings"
     "time"
-    "os"
-
+    "errors"
     "github.com/Cookie579/fin-guard/config"
 )
 
@@ -40,9 +39,13 @@ func RunYouTubeJob(ctx context.Context, cfg *config.Config, jobID, ingestDate st
     defer func() {
         _ = pub.Close(ctx)
     }()
-    // Helper to emit metadata events
+    // Helper to emit metadata events. Each metadata record is tagged with
+    // StageEvents so control-plane events are routed separately from raw
+    // data in the data lake. The ts field records the current UTC time in
+    // RFC3339 format.
     emitMeta := func(eventType string, extra map[string]any) {
         rec := map[string]any{
+            "stage":  StageEvents,
             "type":   eventType,
             "source": source,
             "ticker": ticker,
@@ -59,14 +62,38 @@ func RunYouTubeJob(ctx context.Context, cfg *config.Config, jobID, ingestDate st
     }
     // Emit job_started
     emitMeta("job_started", map[string]any{})
-    // Acquire lock
+    // Acquire lock. If another job holds the lock, return sentinel error without
+    // emitting job_failed so the caller can exit with status code 2.
     if err := store.AcquireLock(ctx, source, ticker, ownerID, jobID); err != nil {
+        if errors.Is(err, ErrLockNotAcquired) {
+            return err
+        }
         emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("lock: %v", err)})
         return err
     }
+    // Print LOCK_ACQUIRED marker
+    fmt.Printf("LOCK_ACQUIRED job_id=%s pk=%s#%s\n", jobID, source, strings.ToUpper(ticker))
     defer func() {
         _ = store.ReleaseLock(context.Background(), source, ticker, ownerID)
     }()
+
+    // Start heartbeat goroutine to extend the lock periodically
+    hbCtx, hbCancel := context.WithCancel(ctx)
+    go func() {
+        t := time.NewTicker(time.Duration(LockHeartbeatSeconds) * time.Second)
+        defer t.Stop()
+        for {
+            select {
+            case <-hbCtx.Done():
+                return
+            case <-t.C:
+                if err := store.HeartbeatLock(ctx, source, ticker, ownerID); err != nil {
+                    log.Printf("WARN: heartbeat failed for %s: %v", ticker, err)
+                }
+            }
+        }
+    }()
+    defer hbCancel()
     // Read YouTube API keys
     ytKeys, err := readYouTubeAPIKeys()
     if err != nil || len(ytKeys) == 0 {
@@ -157,7 +184,7 @@ func RunYouTubeJob(ctx context.Context, cfg *config.Config, jobID, ingestDate st
                 now := time.Now().UTC()
                 year := now.Year()
                 // Insert video ID into DDB to check for duplicates
-                inserted, err := store.InsertYouTubeVideoID(ctx, ticker, vid, year, now, nil, "", jobID)
+                inserted, err := store.InsertYouTubeVideoID(ctx, ticker, year, vid, now, nil, "", jobID)
                 if err != nil {
                     emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("ddb insert: %v", err)})
                     return err
@@ -218,8 +245,9 @@ func searchQueries(tk string) []string {
 // are looked up by a number of common property names. See readRapidAPIKeys
 // for similar logic.
 func readYouTubeAPIKeys() ([]string, error) {
-    path := "../config.json"
-    b, err := os.ReadFile(path)
+    // Load configuration from the first available config.json path. See
+    // loadConfigBytes for details.
+    b, err := loadConfigBytes()
     if err != nil {
         return nil, err
     }
@@ -317,6 +345,7 @@ func fetchAndEmitVideoMeta(ctx context.Context, client *http.Client, pub *Kinesi
     durationMs := parseISO8601Duration(item.ContentDetails.Duration)
     // Compose record
     rec := map[string]any{
+        "stage":        StageRaw,
         "type":         "youtube_video_meta",
         "source":       source,
         "ticker":       ticker,
@@ -413,6 +442,7 @@ func fetchAndEmitVideoComments(ctx context.Context, client *http.Client, pub *Ki
             cid := thread.Snippet.TopLevelComment.ID
             s := thread.Snippet.TopLevelComment.Snippet
             rec := map[string]any{
+                "stage":            StageRaw,
                 "type":             "youtube_comment",
                 "source":           source,
                 "ticker":           ticker,

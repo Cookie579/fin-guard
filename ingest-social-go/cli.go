@@ -9,6 +9,8 @@ import (
     "os/signal"
     "syscall"
     "time"
+    "errors"
+    "strings"
 
     "github.com/google/uuid"
     "github.com/Cookie579/fin-guard/config"
@@ -67,17 +69,14 @@ func main() {
         cancel()
     }()
 
-    // Load API keys from config.json located in the parent directory. The
-    // configuration contains YouTube and StockTwits API keys. If the file
-    // cannot be loaded the program exits.
-    cfg, err := config.Load("../config.json")
-    if err != nil {
-        log.Fatalf("failed to load config.json: %v", err)
-    }
-
     // Generate a unique job identifier and derive the ingest date (UTC)
     jobID := uuid.New().String()
     ingestDate := time.Now().UTC().Format(IngestDateFormat)
+
+    // We do not load configuration here because API keys are read on demand
+    // from config.json via loadConfigBytes() in the runners. Create a nil
+    // config pointer to satisfy the runner signatures.
+    var cfg *config.Config
 
     switch cmd {
     case "stocktwits":
@@ -98,11 +97,21 @@ func main() {
             fs.Usage()
             os.Exit(1)
         }
-        // Start the StockTwits job. runnerStocktwits.go implements the
-        // RunStocktwitsJob function. Any returned error will cause the
-        // program to exit with a non-zero status.
+        // Print JOB_STARTED marker prior to any work. Uppercase ticker for consistency.
+        fmt.Printf("JOB_STARTED job_id=%s source=stocktwits ticker=%s\n", jobID, strings.ToUpper(args.Ticker))
+        // Run the StockTwits job.
         if err := RunStocktwitsJob(ctx, cfg, jobID, ingestDate, args); err != nil {
-            log.Fatalf("stocktwits job failed: %v", err)
+            // Determine exit code based on error type.
+            switch {
+            case errors.Is(err, ErrLockNotAcquired):
+                fmt.Fprintf(os.Stderr, "stocktwits: lock not acquired: %v\n", err)
+                os.Exit(2)
+            case strings.Contains(err.Error(), "terminated"):
+                os.Exit(130)
+            default:
+                fmt.Fprintf(os.Stderr, "stocktwits job failed: %v\n", err)
+                os.Exit(1)
+            }
         }
     case "youtube":
         fs := flag.NewFlagSet("youtube", flag.ExitOnError)
@@ -122,8 +131,19 @@ func main() {
             fs.Usage()
             os.Exit(1)
         }
+        // Print JOB_STARTED marker for YouTube.
+        fmt.Printf("JOB_STARTED job_id=%s source=youtube ticker=%s\n", jobID, strings.ToUpper(args.Ticker))
         if err := RunYouTubeJob(ctx, cfg, jobID, ingestDate, args); err != nil {
-            log.Fatalf("youtube job failed: %v", err)
+            switch {
+            case errors.Is(err, ErrLockNotAcquired):
+                fmt.Fprintf(os.Stderr, "youtube: lock not acquired: %v\n", err)
+                os.Exit(2)
+            case strings.Contains(err.Error(), "terminated"):
+                os.Exit(130)
+            default:
+                fmt.Fprintf(os.Stderr, "youtube job failed: %v\n", err)
+                os.Exit(1)
+            }
         }
     default:
         usage()
