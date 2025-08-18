@@ -1,6 +1,7 @@
 resources:
   - ingest-sec-go.yaml
   - ingest-esg-go.yaml
+  - ingest-social-go.yaml
   - preprocess-config.yaml
   - ghcr-creds.yaml
   - repo-creds.yaml

@@ -18,6 +18,8 @@ spec:
         app.kubernetes.io/instance: {{ .Release.Name }}
     spec:
       serviceAccountName: {{ .Values.serviceAccount.name }}
+      imagePullSecrets:
+        - name: ghcr-creds
       containers:
         - name: app
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"

@@ -12,7 +12,9 @@ service:
   port: 8080
 
 # If you ever need a registry secret (e.g., GHCR), leave as-is or comment out for ECR
-imagePullSecrets: []
+imagePullSecrets:
+  - ghcr-creds
+
 
 # Re-use the SAME SA & IRSA role as ingest-esg-go
 serviceAccount:
