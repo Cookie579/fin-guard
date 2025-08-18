@@ -20,7 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 RUN pip install --no-cache-dir fastapi uvicorn kubernetes
 
 # Copy FastAPI file (orchestrator) and the Go runner binary
-COPY orchestrator.py /app/ingest-social-go.orchestrator.py
+COPY orchestrator.py /app/ingest-social-go/orchestrator.py
 COPY --from=gobuild /app/ingest-social-go/ingest-social-go /usr/local/bin/ingest-social-go
 
 # Default: run the FastAPI so you can POST /jobs/*
