@@ -207,7 +207,7 @@ func (p *KinesisPublisher) flush(ctx context.Context) error {
 		attempt++
 		resp, err := put(remaining)
 		if err != nil {
-			// NEW: log the call-level error before backing off
+			// log the call-level error before backing off
 			fmt.Fprintf(os.Stderr, "PutRecords call error (attempt %d): %v\n", attempt, err)
 			// Network or service error. Sleep with backoff and try again.
 			jitter := time.Duration(rand.Intn(100)) * time.Millisecond
@@ -216,7 +216,7 @@ func (p *KinesisPublisher) flush(ctx context.Context) error {
 			continue
 		}
 
-		// NEW: summary of failed count (if any)
+		// summary of failed count (if any)
 		if resp.FailedRecordCount != nil && *resp.FailedRecordCount > 0 {
 			fmt.Fprintf(os.Stderr, "PutRecords failed count: %d of %d on attempt %d\n",
 				*resp.FailedRecordCount, len(remaining), attempt)
@@ -226,10 +226,10 @@ func (p *KinesisPublisher) flush(ctx context.Context) error {
 		var failed []types.PutRecordsRequestEntry
 		for i, rec := range resp.Records {
 			if rec.ErrorCode != nil && *rec.ErrorCode != "" {
-				// NEW: per-record error details (code + message)
+				// per-record error details (code + message)
 				fmt.Fprintf(os.Stderr, "PutRecords failed[idx=%d attempt=%d]: %s - %s\n",
 					i, attempt, aws.ToString(rec.ErrorCode), aws.ToString(rec.ErrorMessage))
-				// NEW: tiny preview of the offending record (size + pk)
+				// tiny preview of the offending record (size + pk)
 				if i < len(remaining) {
 					pk := ""
 					if remaining[i].PartitionKey != nil {

@@ -27,7 +27,7 @@ spec:
       containers:
         - name: app
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-          imagePullPolicy: {{ "Always" }}
+          imagePullPolicy: {{ .Values.image.pullPolicy | default "Always" }}
           # Force-run the FastAPI orchestrator via bootstrap even if image entrypoint changes
           command: ["/bin/bash", "/app/bootstrap.sh"]
           args: []
