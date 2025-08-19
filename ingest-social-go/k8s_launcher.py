@@ -77,7 +77,7 @@ def launch_job(source: str, ticker: str, extra: list[str] | None = None) -> None
             client.V1Container(
                 name="runner",
                 image=RUNNER_IMAGE,
-                image_pull_policy="IfNotPresent",
+                image_pull_policy="Always",
                 command=args[:1],
                 args=args[1:],
                 env=[client.V1EnvVar(name="AWS_REGION", value=os.getenv("AWS_REGION", "us-east-1"))],
@@ -130,7 +130,7 @@ def launch_cronjob(source: str, ticker: str, schedule: str, extra: list[str] | N
             client.V1Container(
                 name="runner",
                 image=RUNNER_IMAGE,
-                image_pull_policy="IfNotPresent",
+                image_pull_policy="Always",
                 command=args[:1],
                 args=args[1:],
                 volume_mounts=[volume_mount],
