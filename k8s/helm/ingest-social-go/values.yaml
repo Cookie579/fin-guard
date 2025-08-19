@@ -8,7 +8,7 @@ image:
   # Repository and tag for the orchestrator image (Python + FastAPI + bootstrap)
   repository: ghcr.io/cookie579/ingest-social-go
   tag: latest
-  pullPolicy: IfNotPresent
+  pullPolicy: Always
 
 serviceAccount:
   # Name of the ServiceAccount used by the orchestrator Deployment and also
