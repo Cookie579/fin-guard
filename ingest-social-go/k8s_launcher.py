@@ -24,6 +24,8 @@ NAMESPACE = os.getenv("POD_NAMESPACE", "default")
 RUNNER_IMAGE = os.getenv("RUNNER_IMAGE", "ghcr.io/cookie579/ingest-social-go:latest")
 RUNNER_SA = os.getenv("RUNNER_SERVICEACCOUNT", "ingest-social-go")
 IMAGE_PULL_SECRET = os.getenv("IMAGE_PULL_SECRET", "ghcr-creds")
+# Secret name containing config.json. Defaults to preprocess-config.
+CONFIG_SECRET = os.getenv("CONFIG_SECRET", "preprocess-config")
 
 
 def _container_args(source: str, ticker: str, extra: list[str] | None) -> list[str]:
@@ -53,18 +55,33 @@ def launch_job(source: str, ticker: str, extra: list[str] | None = None) -> None
     # Define the pod spec. The worker runs as a single container pod. We
     # propagate AWS_REGION (if provided) so the Go SDK picks up the
     # correct region. Additional envs can be added if needed.
+    # Create a secret volume for config.json. The Go worker expects /app/config.json.
+    volume = client.V1Volume(
+        name="config",
+        secret=client.V1SecretVolumeSource(secret_name=CONFIG_SECRET),
+    )
+    # Mount the secret at /app/config.json. Use sub_path to map the key within the secret.
+    volume_mount = client.V1VolumeMount(
+        name="config",
+        mount_path="/app/config.json",
+        sub_path="config.json",
+        read_only=True,
+    )
+
     pod = client.V1PodSpec(
         service_account_name=RUNNER_SA,
         restart_policy="OnFailure",
         image_pull_secrets=[client.V1LocalObjectReference(name=IMAGE_PULL_SECRET)],
+        volumes=[volume],
         containers=[
             client.V1Container(
                 name="runner",
                 image=RUNNER_IMAGE,
                 image_pull_policy="IfNotPresent",
-                command=args[:1],  # binary path
-                args=args[1:],     # subcommand and flags
+                command=args[:1],
+                args=args[1:],
                 env=[client.V1EnvVar(name="AWS_REGION", value=os.getenv("AWS_REGION", "us-east-1"))],
+                volume_mounts=[volume_mount],
             )
         ],
     )
@@ -93,10 +110,22 @@ def launch_cronjob(source: str, ticker: str, schedule: str, extra: list[str] | N
     batch = client.BatchV1Api()
 
     args = _container_args(source, ticker, extra)
+    # Secret volume for config.json, same as one-off Jobs.
+    volume = client.V1Volume(
+        name="config",
+        secret=client.V1SecretVolumeSource(secret_name=CONFIG_SECRET),
+    )
+    volume_mount = client.V1VolumeMount(
+        name="config",
+        mount_path="/app/config.json",
+        sub_path="config.json",
+        read_only=True,
+    )
     pod = client.V1PodSpec(
         service_account_name=RUNNER_SA,
         restart_policy="OnFailure",
         image_pull_secrets=[client.V1LocalObjectReference(name=IMAGE_PULL_SECRET)],
+        volumes=[volume],
         containers=[
             client.V1Container(
                 name="runner",
@@ -104,6 +133,7 @@ def launch_cronjob(source: str, ticker: str, schedule: str, extra: list[str] | N
                 image_pull_policy="IfNotPresent",
                 command=args[:1],
                 args=args[1:],
+                volume_mounts=[volume_mount],
             )
         ],
     )

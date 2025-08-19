@@ -28,18 +28,36 @@ spec:
         - name: app
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy | default "IfNotPresent" }}
+          # Explicitly define the container entrypoint to run the orchestrator via our
+          # bootstrap script. Even if the image entrypoint changes or a worker-only
+          # image is mistakenly used, this ensures the FastAPI service starts up
+          # instead of the Go binary directly. Without this, ArgoCD may deploy
+          # an image built from the worker Dockerfile and the container will
+          # attempt to execute `ingest-social-go` as a command, leading to
+          # a crash loop with a usage error.
+          command: ["/bin/bash", "/app/bootstrap.sh"]
+          args: []
           ports:
             - name: http
               containerPort: 8081
           env:
             - name: RUNNER_IMAGE
-              value: {{ .Values.runner.image | quote }}
+              # Use the same repository and tag as the orchestrator by default. This ensures the
+              # Job spawned by the orchestrator runs the exact same image that compiled
+              # the Go binary. If you need to override this, set runner.image in values.yaml.
+              value: {{ (printf "%s:%s" .Values.image.repository .Values.image.tag) | quote }}
             - name: RUNNER_SERVICEACCOUNT
               value: {{ .Values.runner.serviceAccountName | quote }}
             - name: IMAGE_PULL_SECRET
               value: {{ .Values.runner.imagePullSecret | quote }}
             - name: AWS_REGION
               value: {{ .Values.aws.region | default "us-east-1" | quote }}
+            - name: CONFIG_SECRET
+              # Name of the Kubernetes Secret containing config.json. This is
+              # mounted into worker Job pods so they can read API keys. The
+              # orchestrator itself does not mount the secret, but it passes
+              # this value to the launcher via an environment variable.
+              value: {{ .Values.configSecret | default "preprocess-config" | quote }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

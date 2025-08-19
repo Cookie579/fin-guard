@@ -35,6 +35,12 @@ runner:
   # secret in the target namespace prior to deploying the chart.
   imagePullSecret: ghcr-creds
 
+# Name of the Kubernetes Secret containing config.json. Worker pods mount
+# this secret at /app/config.json so the Go collectors can read API keys.
+# If you change this, also update the name of the Secret you create in
+# your cluster (see k8s/argocd/preprocess-config.yaml or equivalent).
+configSecret: preprocess-config
+
 aws:
   # AWS region for the worker Jobs. This sets the AWS_REGION env var on
   # the worker. The region is not read from config.json – it is defined
