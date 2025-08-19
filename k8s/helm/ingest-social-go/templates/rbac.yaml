@@ -1,12 +1,3 @@
-# k8s/helm/ingest-social-go/templates/rbac.yaml
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: {{ .Values.serviceAccount.name }}
-  labels:
-    app.kubernetes.io/name: {{ include "ingest-social-go.name" . }}
-
----
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -28,6 +19,6 @@ subjects:
   - kind: ServiceAccount
     name: {{ .Values.serviceAccount.name }}
 roleRef:
+  apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: {{ include "ingest-social-go.fullname" . }}-orchestrator
-  apiGroup: rbac.authorization.k8n.io

@@ -21,5 +21,14 @@ COPY . .
 COPY ingest-social-go/bootstrap.sh /app/bootstrap.sh
 RUN chmod +x /app/bootstrap.sh
 
+# Build the Go ingest binary during the image build. This avoids
+# recompilation on container startup and ensures the binary is present for
+# Jobs launched by the orchestrator. The binary will be located at
+# /app/bin/ingest-social-go. If you change this path, update
+# k8s_launcher.py accordingly.
+RUN mkdir -p /app/bin && \
+    CGO_ENABLED=0 /usr/local/go/bin/go build -trimpath -ldflags "-s -w" \
+    -o /app/bin/ingest-social-go ./ingest-social-go
+
 EXPOSE 8081
 ENTRYPOINT ["/bin/bash","/app/bootstrap.sh"]

@@ -1,6 +1,6 @@
 apiVersion: v2
 name: ingest-social-go
-description: Social collectors (StockTwits/YouTube/Reddit)
+description: Social collectors (StockTwits/YouTube/Reddit) orchestrator + job launcher
 type: application
 version: 0.1.0
 appVersion: "1.0.0"

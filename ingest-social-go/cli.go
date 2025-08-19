@@ -2,18 +2,17 @@ package main
 
 import (
     "context"
+    "errors"
     "flag"
     "fmt"
     "log"
     "os"
     "os/signal"
+    "strings"
     "syscall"
     "time"
-    "errors"
-    "strings"
 
     "github.com/google/uuid"
-    "github.com/Cookie579/fin-guard/config"
 )
 
 // stocktwitsArgs captures the set of command line flags accepted by the
@@ -74,9 +73,8 @@ func main() {
     ingestDate := time.Now().UTC().Format(IngestDateFormat)
 
     // We do not load configuration here because API keys are read on demand
-    // from config.json via loadConfigBytes() in the runners. Create a nil
-    // config pointer to satisfy the runner signatures.
-    var cfg *config.Config
+    // from config.json via loadFlatConfig() in the runners. A config
+    // pointer is no longer needed by the runner signatures.
 
     switch cmd {
     case "stocktwits":
@@ -100,7 +98,7 @@ func main() {
         // Print JOB_STARTED marker prior to any work. Uppercase ticker for consistency.
         fmt.Printf("JOB_STARTED job_id=%s source=stocktwits ticker=%s\n", jobID, strings.ToUpper(args.Ticker))
         // Run the StockTwits job.
-        if err := RunStocktwitsJob(ctx, cfg, jobID, ingestDate, args); err != nil {
+        if err := RunStocktwitsJob(ctx, jobID, ingestDate, args); err != nil {
             // Determine exit code based on error type.
             switch {
             case errors.Is(err, ErrLockNotAcquired):
@@ -133,7 +131,7 @@ func main() {
         }
         // Print JOB_STARTED marker for YouTube.
         fmt.Printf("JOB_STARTED job_id=%s source=youtube ticker=%s\n", jobID, strings.ToUpper(args.Ticker))
-        if err := RunYouTubeJob(ctx, cfg, jobID, ingestDate, args); err != nil {
+        if err := RunYouTubeJob(ctx, jobID, ingestDate, args); err != nil {
             switch {
             case errors.Is(err, ErrLockNotAcquired):
                 fmt.Fprintf(os.Stderr, "youtube: lock not acquired: %v\n", err)

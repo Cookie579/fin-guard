@@ -3,6 +3,7 @@ package main
 import (
     "context"
     "encoding/json"
+    "errors"
     "fmt"
     "io"
     "log"
@@ -11,19 +12,15 @@ import (
     "strconv"
     "strings"
     "time"
-    "errors"
-    "github.com/Cookie579/fin-guard/config"
 )
 
 // RunStocktwitsJob orchestrates the lifecycle of a single StockTwits ingest
-// job. It takes the loaded configuration, the unique job ID, the ingest
-// date string and the parsed command line arguments. The function
-// implements locking, state management, message fetching, event emission
-// and graceful termination in response to context cancellation. On error
-// the job will emit a job_failed event before returning the error.
-func RunStocktwitsJob(ctx context.Context, cfg *config.Config, jobID, ingestDate string, args *stocktwitsArgs) error {
-    // Suppress unused import warning for cfg; API keys are read via loadConfigBytes().
-    _ = cfg
+// job. It takes the unique job ID, the ingest date string and the parsed
+// command line arguments. The function implements locking, state management,
+// message fetching, event emission and graceful termination in response to
+// context cancellation. On error the job will emit a job_failed event
+// before returning the error.
+func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stocktwitsArgs) error {
     ticker := strings.ToUpper(args.Ticker)
     source := "stocktwits"
     ownerID := jobID
@@ -263,54 +260,4 @@ func RunStocktwitsJob(ctx context.Context, cfg *config.Config, jobID, ingestDate
     durationMs := time.Since(startTime).Milliseconds()
     emitMeta("job_completed", map[string]any{"duration_ms": durationMs})
     return nil
-}
-
-// readRapidAPIKeys parses the config.json file in the parent directory and
-// attempts to extract a list of RapidAPI keys. Keys are looked for under
-// several commonly used property names. If no keys are found the
-// returned slice will be empty. An error is only returned if the file
-// cannot be read or parsed.
-func readRapidAPIKeys() ([]string, error) {
-    // Load configuration from the first available config.json path. This
-    // helper tries /app/config.json, ./config.json and ../config.json in
-    // that order and returns an error if none are found.
-    b, err := loadConfigBytes()
-    if err != nil {
-        return nil, err
-    }
-    var m map[string]any
-    if err := json.Unmarshal(b, &m); err != nil {
-        return nil, err
-    }
-    var out []string
-    tryKeys := []string{
-        "rapidApiKey", "rapid_api_key", "RapidAPIKey", "rapidAPIKey", "stocktwitsApiKey", "stockTwitsApiKey",
-        "stocktwits_keys", "stockTwitsKeys", "StockTwitsKeys",
-    }
-    for _, k := range tryKeys {
-        if v, ok := m[k]; ok {
-            switch vv := v.(type) {
-            case string:
-                if vv != "" {
-                    out = append(out, vv)
-                }
-            case []any:
-                for _, it := range vv {
-                    if s, ok := it.(string); ok && s != "" {
-                        out = append(out, s)
-                    }
-                }
-            }
-        }
-    }
-    // Deduplicate keys
-    uniq := map[string]struct{}{}
-    var dedup []string
-    for _, k := range out {
-        if _, ok := uniq[k]; !ok {
-            uniq[k] = struct{}{}
-            dedup = append(dedup, k)
-        }
-    }
-    return dedup, nil
 }

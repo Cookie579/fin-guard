@@ -23,37 +23,34 @@ spec:
     spec:
       serviceAccountName: {{ .Values.serviceAccount.name }}
       imagePullSecrets:
-        - name: ghcr-creds
+        - name: {{ .Values.runner.imagePullSecret | default "ghcr-creds" | quote }}
       containers:
         - name: app
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy | default "IfNotPresent" }}
-          # No command/args here — let Dockerfile ENTRYPOINT run bootstrap.sh (Uvicorn).
           ports:
             - name: http
               containerPort: 8081
           env:
-            # These are read by k8s_launcher.py inside the orchestrator
             - name: RUNNER_IMAGE
-              value: {{ .Values.runner.image | default "ghcr.io/cookie579/ingest-social-go:latest" | quote }}
+              value: {{ .Values.runner.image | quote }}
             - name: RUNNER_SERVICEACCOUNT
-              value: {{ .Values.runner.serviceAccountName | default .Values.serviceAccount.name | quote }}
+              value: {{ .Values.runner.serviceAccountName | quote }}
             - name: IMAGE_PULL_SECRET
-              value: {{ .Values.runner.imagePullSecret | default "ghcr-creds" | quote }}
+              value: {{ .Values.runner.imagePullSecret | quote }}
             - name: AWS_REGION
               value: {{ .Values.aws.region | default "us-east-1" | quote }}
-            # Optional: pass through any other config your Jobs need (streams/buckets/etc.)
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
           readinessProbe:
-            httpGet: { path: /, port: 8081 }
+            httpGet: { path: "/", port: 8081 }
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 2
             failureThreshold: 6
           livenessProbe:
-            httpGet: { path: /, port: 8081 }
+            httpGet: { path: "/", port: 8081 }
             initialDelaySeconds: 10
             periodSeconds: 10
             timeoutSeconds: 2
@@ -68,11 +65,5 @@ spec:
           {{- end }}
       {{- with .Values.extraVolumes }}
       volumes:
-        {{- toYaml . | nindent 8 }}
+        {{- toYaml . | nindent 6 }}
       {{- end }}
-      # (Optional) Hardening — uncomment if you want to run as non-root
-      # securityContext:
-      #   runAsNonRoot: true
-      #   runAsUser: 1000
-      #   runAsGroup: 1000
-      #   fsGroup: 1000

@@ -1,29 +1,53 @@
+# Default values for the ingest-social-go chart.
+# These values configure both the orchestrator Deployment and the worker
+# Jobs launched by the orchestrator. Adjust as necessary for your
+# environment (e.g. pin image tags, set a roleArn, or supply extra
+# environment variables).
+
 image:
-  repository: ghcr.io/cookie579/ingest-social-go   # orchestrator image
-  tag: latest                                      # recommend pinning to a version later
-  pullPolicy: Always
+  # Repository and tag for the orchestrator image (Python + FastAPI + bootstrap)
+  repository: ghcr.io/cookie579/ingest-social-go
+  tag: latest
+  pullPolicy: IfNotPresent
 
 serviceAccount:
-  name: ingest-social-go                           # orchestrator SA (has RBAC)
+  # Name of the ServiceAccount used by the orchestrator Deployment and also
+  # supplied to Jobs launched by the orchestrator (via RUNNER_SERVICEACCOUNT).
+  name: ingest-social-go
+  # AWS IAM role ARN to use when running in EKS. Leave as an empty
+  # string if not using IRSA. The Helm template will always emit the
+  # annotation as a quoted string to satisfy ArgoCD.
+  roleArn: ""
+  # Additional annotations can be added here. They will be merged
+  # alongside the role annotation. E.g. {"iam.gke.io/gcp-service-account": "foo@project.iam.gserviceaccount.com"}
+  annotations: {}
 
 runner:
-  image: ghcr.io/cookie579/ingest-social-go:latest # runner image for Jobs
-  serviceAccountName: ingest-social-go             # or a dedicated SA with IRSA
+  # Docker image for the Go worker launched by the orchestrator. This
+  # should match the tag built from Dockerfile. Pin to a SHA or version
+  # tag to avoid upgrades breaking running Jobs.
+  image: ghcr.io/cookie579/ingest-social-go:latest
+  # ServiceAccount for the worker Jobs. Defaults to the same SA as the
+  # orchestrator but can be overridden if using separate IAM roles.
+  serviceAccountName: ingest-social-go
+  # Name of the imagePullSecret used to pull both orchestrator and runner
+  # images from private registries such as GHCR. You must create this
+  # secret in the target namespace prior to deploying the chart.
   imagePullSecret: ghcr-creds
 
 aws:
+  # AWS region for the worker Jobs. This sets the AWS_REGION env var on
+  # the worker. The region is not read from config.json – it is defined
+  # here to keep infra configuration out of the API key file.
   region: us-east-1
 
 replicaCount: 1
 
+# Extra environment variables for the orchestrator container (optional).
+#extraEnv:
+#  - name: SOME_ENV
+#    value: "some-value"
 
-# Mount the same config.json Secret used by ingest-esg-go
-extraVolumes:
-  - name: config-volume
-    secret:
-      secretName: preprocess-config
-
-extraVolumeMounts:
-  - name: config-volume
-    mountPath: /app/config.json
-    subPath: config.json
+# Additional volumes and mounts for the orchestrator container (optional).
+#extraVolumes: []
+#extraVolumeMounts: []

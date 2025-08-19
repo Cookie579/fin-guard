@@ -3,6 +3,7 @@ package main
 import (
     "context"
     "encoding/json"
+    "errors"
     "fmt"
     "io"
     "log"
@@ -11,8 +12,6 @@ import (
     "strconv"
     "strings"
     "time"
-    "errors"
-    "github.com/Cookie579/fin-guard/config"
 )
 
 // RunYouTubeJob orchestrates a YouTube ingest job. It searches for new
@@ -21,10 +20,7 @@ import (
 // publishes the resulting records to Kinesis and updates the state on
 // completion. On error it emits a job_failed event. The function honours
 // context cancellation and will terminate gracefully when cancelled.
-func RunYouTubeJob(ctx context.Context, cfg *config.Config, jobID, ingestDate string, args *youtubeArgs) error {
-    // Suppress unused import warning for cfg; YouTube keys are read
-    // directly from config.json via readYouTubeAPIKeys().
-    _ = cfg
+func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeArgs) error {
     ticker := strings.ToUpper(args.Ticker)
     source := "youtube"
     ownerID := jobID
