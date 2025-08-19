@@ -19,6 +19,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/kinesis/types"
 )
 
+// Use a short, self-contained timeout per PutRecords call so a parent cancel
+// (e.g., job teardown) doesn't abort Kinesis flushes mid-flight.
+const KinPutTimeout = 15 * time.Second
+
 // KinesisPublisher batches and publishes records to an AWS Kinesis stream
 // according to the limits specified in constants.go. Each publisher is
 // associated with a single job and maintains its own buffers. Call Close()
@@ -156,7 +160,10 @@ func (p *KinesisPublisher) flush(ctx context.Context) error {
 			Records:    entries,
 			StreamName: aws.String(p.streamName),
 		}
-		return p.client.PutRecords(ctx, req)
+		// Fresh, short-lived context for each PutRecords to avoid parent cancellations.
+		opCtx, cancel := context.WithTimeout(context.Background(), KinPutTimeout)
+		defer cancel()
+		return p.client.PutRecords(opCtx, req)
 	}
 
 	remaining := batch
@@ -198,7 +205,7 @@ func (p *KinesisPublisher) flush(ctx context.Context) error {
 		}
 
 		if len(failed) == 0 {
-			// *** FIX: mark as success so post-loop drop warning doesn't trigger
+			// Success — prevent false "dropping N" after the loop.
 			remaining = nil
 			break
 		}
