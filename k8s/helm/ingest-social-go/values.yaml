@@ -17,7 +17,7 @@ serviceAccount:
   # AWS IAM role ARN to use when running in EKS. Leave as an empty
   # string if not using IRSA. The Helm template will always emit the
   # annotation as a quoted string to satisfy ArgoCD.
-  roleArn: ""
+  roleArn: arn:aws:iam::084071638445:role/preprocess-irsa-role
   # Additional annotations can be added here. They will be merged
   # alongside the role annotation. E.g. {"iam.gke.io/gcp-service-account": "foo@project.iam.gserviceaccount.com"}
   annotations: {}
