@@ -53,7 +53,7 @@ const (
 	// a batch to Kinesis. The PutRecords API allows up to 5 MiB per call.
 	// We conservatively cap this at 4 MiB to leave room for partition keys
 	// and request overhead.
-	KinMaxBytes = 900_000
+	KinMaxBytes = 4_000_000
 
 	// KinFlushEveryMs controls how often the publisher flushes any
 	// accumulated records, even if neither the record count nor byte
