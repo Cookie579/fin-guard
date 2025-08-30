@@ -45,6 +45,7 @@ ingest-esg-go/ingest-esg-go
 
 eksctl/
 ingest-social-go/data
+ingest-social-go-local
 esg-content/
 
 *.zip
