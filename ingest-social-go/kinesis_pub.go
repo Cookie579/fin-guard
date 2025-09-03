@@ -118,19 +118,36 @@ func (p *KinesisPublisher) AddRecord(source, ticker, rowKey string, payload map[
 		return errors.New("nil payload")
 	}
 
-	// Strictly enforce a partitionable date for Stocktwits
-	if source == "stocktwits" {
-		// Expect created_at to be a string
-		v, ok := payload["created_at"]
-		createdAt, ok2 := v.(string)
-		if !ok || !ok2 || createdAt == "" {
-			return fmt.Errorf("stocktwits: missing or non-string created_at (got %T)", v)
+	// Enforce a partitionable date ONLY for RAW records (EVENTS use .ts and shouldn't be blocked here).
+	stg, _ := payload["stage"].(string)
+	if strings.EqualFold(stg, "RAW") {
+		switch strings.ToLower(source) {
+		case "stocktwits":
+			s, ok := payload["created_at"].(string)
+			if !ok || s == "" {
+				return fmt.Errorf("stocktwits RAW: missing created_at")
+			}
+			fd, err := mustYYYYMMDDFromRFC3339(s)
+			if err != nil {
+				return fmt.Errorf("stocktwits RAW: %v", err)
+			}
+			payload["filingDate"] = fd
+
+		case "youtube":
+			s, ok := payload["published_at"].(string)
+			if !ok || s == "" {
+				return fmt.Errorf("youtube RAW: missing published_at")
+			}
+			fd, err := mustYYYYMMDDFromRFC3339(s)
+			if err != nil {
+				return fmt.Errorf("youtube RAW: %v", err)
+			}
+			payload["filingDate"] = fd
+
+		default:
+			// Other sources: add similar derivation here if you want strict RAW enforcement.
+			// For now, do nothing.
 		}
-		fd, err := mustYYYYMMDDFromRFC3339(createdAt)
-		if err != nil {
-			return fmt.Errorf("stocktwits: %w", err) // fail fast — you asked for strict
-		}
-		payload["filingDate"] = fd // Firehose JQ will read this
 	}
 
 	b, err := json.Marshal(payload)
@@ -138,10 +155,10 @@ func (p *KinesisPublisher) AddRecord(source, ticker, rowKey string, payload map[
 		return fmt.Errorf("marshal payload: %w", err)
 	}
 
-	// (Keep your size-guard for non-ST sources as-is if you want)
+	// Size guard (preserve your existing behavior)
 	if len(b) > 900_000 {
 		if desc, ok := payload["description"].(string); ok && len(desc) > 0 {
-			maxDesc := 800_000
+			const maxDesc = 800_000
 			if len(desc) > maxDesc {
 				payload["description"] = desc[:maxDesc]
 			}
@@ -156,7 +173,7 @@ func (p *KinesisPublisher) AddRecord(source, ticker, rowKey string, payload map[
 		}
 	}
 
-	// Optional: dump a sample of the exact JSON we send (helps verify)
+	// Optional debug sample of the exact JSON being sent (set KIN_DEBUG_DUMP=1)
 	if os.Getenv("KIN_DEBUG_DUMP") == "1" && rand.Intn(30) == 0 {
 		fmt.Fprintf(os.Stdout, "KIN_PAYLOAD %s\n", string(b))
 	}
