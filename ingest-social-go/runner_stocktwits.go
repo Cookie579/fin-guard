@@ -54,7 +54,6 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 		}
 	}
 
-	// Emit job_started event
 	emitMeta("job_started", map[string]any{})
 
 	// Acquire lock
@@ -95,8 +94,7 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 	if args.SinceID > 0 {
 		latestID = args.SinceID
 	}
-	// We'll accumulate the minimum ID we see across this job and merge with existing
-	accOldest := existingOldest
+	accOldest := existingOldest // we’ll merge page mins into this
 
 	// RapidAPI host/key
 	host, apiKey, err := getRapidAPIHostAndKey()
@@ -111,147 +109,248 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 	var processedCount int
 	startTime := time.Now()
 	pagesFetched := 0
+	maxPages := args.MaxPages // 0 means unlimited
 
-	for {
-		if args.MaxPages > 0 && pagesFetched >= args.MaxPages {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			emitMeta("job_failed", map[string]any{"reason": "terminated"})
-			return fmt.Errorf("terminated")
-		default:
-		}
-
+	// Small helper to fetch one page with arbitrary query params.
+	fetchPage := func(q url.Values) ([]byte, error) {
 		endpoint := fmt.Sprintf("/streams/symbol/%s.json", ticker)
-		v := url.Values{}
-		if latestID > 0 {
-			v.Set("since", strconv.FormatInt(latestID, 10))
-		}
 		reqURL := baseURL + endpoint
-		if len(v) > 0 {
-			reqURL += "?" + v.Encode()
+		if len(q) > 0 {
+			reqURL += "?" + q.Encode()
 		}
-
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 		req.Header.Set("X-RapidAPI-Host", host)
 		req.Header.Set("X-RapidAPI-Key", apiKey)
 		req.Header.Set("User-Agent", "ingest-social-go/1.0")
-
 		resp, err := client.Do(req)
 		if err != nil {
-			emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("HTTP error: %v", err)})
-			return err
+			return nil, err
 		}
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
-			err := fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-			emitMeta("job_failed", map[string]any{"reason": err.Error()})
-			return err
+			return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
 		}
+		return body, nil
+	}
 
+	type pageMsg struct {
+		ID        int64  `json:"id"`
+		CreatedAt string `json:"created_at"`
+		Body      string `json:"body"`
+		Symbols   []struct {
+			Symbol string `json:"symbol"`
+		} `json:"symbols"`
+		Entities struct {
+			Sentiment struct {
+				Basic string `json:"basic"`
+			} `json:"sentiment"`
+		} `json:"entities"`
+		Likes struct {
+			Total int `json:"total"`
+		} `json:"likes"`
+		Reshares struct {
+			ResharedCount int `json:"reshared_count"`
+		} `json:"reshares"`
+		User struct {
+			ID       int64  `json:"id"`
+			Username string `json:"username"`
+		} `json:"user"`
+	}
+	parse := func(body []byte) ([]pageMsg, error) {
 		var parsed struct {
-			Messages []struct {
-				ID        int64  `json:"id"`
-				CreatedAt string `json:"created_at"`
-				Body      string `json:"body"`
-				Symbols   []struct {
-					Symbol string `json:"symbol"`
-				} `json:"symbols"`
-				Entities struct {
-					Sentiment struct {
-						Basic string `json:"basic"`
-					} `json:"sentiment"`
-				} `json:"entities"`
-				Likes struct {
-					Total int `json:"total"`
-				} `json:"likes"`
-				Reshares struct {
-					ResharedCount int `json:"reshared_count"`
-				} `json:"reshares"`
-				User struct {
-					ID       int64  `json:"id"`
-					Username string `json:"username"`
-				} `json:"user"`
-			} `json:"messages"`
+			Messages []pageMsg `json:"messages"`
 		}
 		if err := json.Unmarshal(body, &parsed); err != nil {
-			emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("unmarshal: %v", err)})
-			return err
+			return nil, err
 		}
+		return parsed.Messages, nil
+	}
 
-		if len(parsed.Messages) == 0 {
-			break
+	// ---------- PASS 1: Forward (since latestID) ----------
+	if ctx.Err() == nil {
+		q := url.Values{}
+		if latestID > 0 {
+			q.Set("since", strconv.FormatInt(latestID, 10))
 		}
-
-		// Track the minimum ID seen on THIS page
-		var pageMinID int64
-
-		for _, msg := range parsed.Messages {
-			// honor until-id
-			if args.UntilID > 0 && msg.ID <= args.UntilID {
-				pagesFetched = args.MaxPages // force outer break
+		for {
+			if maxPages > 0 && pagesFetched >= maxPages {
 				break
 			}
-
-			// symbols -> []string
-			var syms []string
-			for _, s := range msg.Symbols {
-				if s.Symbol != "" {
-					syms = append(syms, strings.ToUpper(s.Symbol))
-				}
+			select {
+			case <-ctx.Done():
+				emitMeta("job_failed", map[string]any{"reason": "terminated"})
+				return fmt.Errorf("terminated")
+			default:
 			}
 
-			sentiment := msg.Entities.Sentiment.Basic
-			rec := map[string]any{
-				"stage":         StageRaw,
-				"type":          "stocktwits_message",
-				"source":        source,
-				"ticker":        ticker,
-				"ingest_date":   ingestDate,
-				"job_id":        jobID,
-				"message_id":    msg.ID,
-				"created_at":    msg.CreatedAt,
-				"text":          msg.Body,
-				"symbols":       syms,
-				"sentiment":     sentiment,
-				"likes":         msg.Likes.Total,
-				"reshares":      msg.Reshares.ResharedCount,
-				"user_id":       msg.User.ID,
-				"user_username": msg.User.Username,
-			}
-
-			rowKey := strconv.FormatInt(msg.ID, 10)
-			if err := pub.AddRecord(source, ticker, rowKey, rec); err != nil {
-				emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("publish: %v", err)})
+			body, err := fetchPage(q)
+			if err != nil {
+				emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("HTTP error: %v", err)})
 				return err
 			}
-			processedCount++
-
-			// update latest / pageMin
-			if msg.ID > latestID {
-				latestID = msg.ID
+			msgs, err := parse(body)
+			if err != nil {
+				emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("unmarshal: %v", err)})
+				return err
 			}
-			if pageMinID == 0 || msg.ID < pageMinID {
-				pageMinID = msg.ID
+			if len(msgs) == 0 {
+				break // no newer messages
 			}
-		}
 
-		pagesFetched++
+			var pageMinID int64
+			for _, msg := range msgs {
+				if args.UntilID > 0 && msg.ID <= args.UntilID {
+					pagesFetched = maxPages // force outer break
+					break
+				}
+				// symbols -> []string
+				var syms []string
+				for _, s := range msg.Symbols {
+					if s.Symbol != "" {
+						syms = append(syms, strings.ToUpper(s.Symbol))
+					}
+				}
+				rec := map[string]any{
+					"stage":         StageRaw,
+					"type":          "stocktwits_message",
+					"source":        source,
+					"ticker":        ticker,
+					"ingest_date":   ingestDate,
+					"job_id":        jobID,
+					"message_id":    msg.ID,
+					"created_at":    msg.CreatedAt,
+					"text":          msg.Body,
+					"symbols":       syms,
+					"sentiment":     msg.Entities.Sentiment.Basic,
+					"likes":         msg.Likes.Total,
+					"reshares":      msg.Reshares.ResharedCount,
+					"user_id":       msg.User.ID,
+					"user_username": msg.User.Username,
+				}
+				rowKey := strconv.FormatInt(msg.ID, 10)
+				if err := pub.AddRecord(source, ticker, rowKey, rec); err != nil {
+					emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("publish: %v", err)})
+					return err
+				}
+				processedCount++
 
-		// Merge pageMin into accumulated oldest and persist both values
-		if pageMinID > 0 {
-			if accOldest == 0 || pageMinID < accOldest {
+				if msg.ID > latestID {
+					latestID = msg.ID
+				}
+				if pageMinID == 0 || msg.ID < pageMinID {
+					pageMinID = msg.ID
+				}
+			}
+			pagesFetched++
+
+			// Merge oldest and persist
+			if pageMinID > 0 && (accOldest == 0 || pageMinID < accOldest) {
 				accOldest = pageMinID
 			}
-		}
-		if err := store.UpdateStocktwitsState(ctx, ticker, latestID, accOldest); err != nil {
-			emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("state update: %v", err)})
-			return err
-		}
+			if err := store.UpdateStocktwitsState(ctx, ticker, latestID, accOldest); err != nil {
+				emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("state update: %v", err)})
+				return err
+			}
+			emitMeta("batch_committed", map[string]any{"records": processedCount})
 
-		emitMeta("batch_committed", map[string]any{"records": processedCount})
+			// Next forward page: keep using the same "since=latestID"
+			// (API returns only newer-than latestID; break above when none)
+		}
+	}
+
+	// ---------- PASS 2: Backfill (older-than oldest) ----------
+	// If we still have page budget (or unlimited), walk backwards.
+	if ctx.Err() == nil && (maxPages == 0 || pagesFetched < maxPages) {
+		// Start from the oldest known; if we don't have one yet, seed with latestID.
+		maxID := accOldest
+		if maxID == 0 {
+			maxID = latestID
+		}
+		for {
+			if maxPages > 0 && pagesFetched >= maxPages {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				emitMeta("job_failed", map[string]any{"reason": "terminated"})
+				return fmt.Errorf("terminated")
+			default:
+			}
+			if maxID <= 1 {
+				break // nothing older to request
+			}
+
+			q := url.Values{}
+			// "max" means return messages with ID <= max; use maxID-1 to avoid duplicating boundary.
+			q.Set("max", strconv.FormatInt(maxID-1, 10))
+
+			body, err := fetchPage(q)
+			if err != nil {
+				emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("HTTP error: %v", err)})
+				return err
+			}
+			msgs, err := parse(body)
+			if err != nil {
+				emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("unmarshal: %v", err)})
+				return err
+			}
+			if len(msgs) == 0 {
+				break // reached the end of history (or API doesn't have older)
+			}
+
+			var pageMinID int64
+			for _, msg := range msgs {
+				// symbols -> []string
+				var syms []string
+				for _, s := range msg.Symbols {
+					if s.Symbol != "" {
+						syms = append(syms, strings.ToUpper(s.Symbol))
+					}
+				}
+				rec := map[string]any{
+					"stage":         StageRaw,
+					"type":          "stocktwits_message",
+					"source":        source,
+					"ticker":        ticker,
+					"ingest_date":   ingestDate,
+					"job_id":        jobID,
+					"message_id":    msg.ID,
+					"created_at":    msg.CreatedAt,
+					"text":          msg.Body,
+					"symbols":       syms,
+					"sentiment":     msg.Entities.Sentiment.Basic,
+					"likes":         msg.Likes.Total,
+					"reshares":      msg.Reshares.ResharedCount,
+					"user_id":       msg.User.ID,
+					"user_username": msg.User.Username,
+				}
+				rowKey := strconv.FormatInt(msg.ID, 10)
+				if err := pub.AddRecord(source, ticker, rowKey, rec); err != nil {
+					emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("publish: %v", err)})
+					return err
+				}
+				processedCount++
+
+				if pageMinID == 0 || msg.ID < pageMinID {
+					pageMinID = msg.ID
+				}
+			}
+			pagesFetched++
+
+			// Advance the backfill cursor and persist oldest
+			if pageMinID > 0 {
+				maxID = pageMinID
+				if accOldest == 0 || pageMinID < accOldest {
+					accOldest = pageMinID
+				}
+			}
+			if err := store.UpdateStocktwitsState(ctx, ticker, latestID, accOldest); err != nil {
+				emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("state update: %v", err)})
+				return err
+			}
+			emitMeta("batch_committed", map[string]any{"records": processedCount})
+		}
 	}
 
 	// Completed
