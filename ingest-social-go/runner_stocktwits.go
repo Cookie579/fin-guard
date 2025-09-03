@@ -25,6 +25,7 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 	ticker := strings.ToUpper(args.Ticker)
 	source := "stocktwits"
 	ownerID := jobID
+
 	// Initialise DynamoDB store and Kinesis publisher
 	store, err := NewDynamoStore(ctx)
 	if err != nil {
@@ -34,14 +35,9 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 	if err != nil {
 		return fmt.Errorf("create kinesis publisher: %w", err)
 	}
-	defer func() {
-		// Always attempt to close the publisher at the end
-		_ = pub.Close(ctx)
-	}()
-	// Helper to emit a metadata event. Metadata events are emitted to
-	// Kinesis using a synthetic row key. They include the ingest date and
-	// current timestamp. Each metadata record is tagged with StageEvents
-	// so that control-plane events are partitioned separately from raw data.
+	defer func() { _ = pub.Close(ctx) }()
+
+	// Helper to emit a metadata event
 	emitMeta := func(eventType string, extra map[string]any) {
 		rec := map[string]any{
 			"stage":  StageEvents,
@@ -52,19 +48,16 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 			"ts":     time.Now().UTC().Format(time.RFC3339),
 		}
 		maps.Copy(rec, extra)
-		// Partition key uses a synthetic row key based on the event type so
-		// that all metadata for a job goes to the same shard family.
 		rowKey := fmt.Sprintf("meta:%s", eventType)
 		if err := pub.AddRecord(source, ticker, rowKey, rec); err != nil {
 			log.Printf("WARN: failed to emit %s event: %v", eventType, err)
 		}
 	}
-	// Emit job_started event immediately
+
+	// Emit job_started event
 	emitMeta("job_started", map[string]any{})
-	// Attempt to acquire the lock. If the lock is not acquired because
-	// another job is active, return immediately without emitting a job_failed
-	// event. CLI will exit with status code 2 in this case. For other
-	// errors we emit a job_failed event.
+
+	// Acquire lock
 	if err := store.AcquireLock(ctx, source, ticker, ownerID, jobID); err != nil {
 		if errors.Is(err, ErrLockNotAcquired) {
 			return err
@@ -72,19 +65,10 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 		emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("lock: %v", err)})
 		return err
 	}
-	// Print a marker to stdout indicating the lock has been acquired. Use
-	// <source#TICKER> as the primary key format. Keep source lower-case
-	// and ticker upper-case to match the pk.
 	fmt.Printf("LOCK_ACQUIRED job_id=%s pk=%s#%s\n", jobID, source, strings.ToUpper(ticker))
-	defer func() {
-		// Always release the lock on exit
-		_ = store.ReleaseLock(context.Background(), source, ticker, ownerID)
-	}()
+	defer func() { _ = store.ReleaseLock(context.Background(), source, ticker, ownerID) }()
 
-	// Start a heartbeat goroutine to extend the lock periodically. It stops
-	// when the job context is cancelled or returns. Errors are logged but
-	// do not terminate the job immediately; a subsequent operation may
-	// detect the lost lock.
+	// Heartbeat
 	hbCtx, hbCancel := context.WithCancel(ctx)
 	go func() {
 		t := time.NewTicker(time.Duration(LockHeartbeatSeconds) * time.Second)
@@ -101,19 +85,20 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 		}
 	}()
 	defer hbCancel()
-	// Load state from DDB
-	latestID, _, err := store.GetStocktwitsState(ctx, ticker)
+
+	// Load state
+	latestID, existingOldest, err := store.GetStocktwitsState(ctx, ticker)
 	if err != nil {
 		emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("state load: %v", err)})
 		return err
 	}
-	// Honour --since-id flag if provided
 	if args.SinceID > 0 {
 		latestID = args.SinceID
 	}
-	// Determine RapidAPI host and key using the flat config loader. If no
-	// keys are available the job cannot proceed. Host will default to
-	// DefaultRapidAPIHost if rapidapi_host is not set in config.json.
+	// We'll accumulate the minimum ID we see across this job and merge with existing
+	accOldest := existingOldest
+
+	// RapidAPI host/key
 	host, apiKey, err := getRapidAPIHostAndKey()
 	if err != nil {
 		err = fmt.Errorf("stocktwits: %w", err)
@@ -121,16 +106,13 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 		return err
 	}
 	client := &http.Client{Timeout: 45 * time.Second}
-	// Build base URL for StockTwits API using the resolved host
 	baseURL := fmt.Sprintf("https://%s", host)
-	// Track number of processed records to emit batch_committed events
+
 	var processedCount int
-	// Record the start time to compute job duration on completion
 	startTime := time.Now()
-	// Begin page loop
 	pagesFetched := 0
+
 	for {
-		// Respect --max-pages if it is positive (0 means unlimited)
 		if args.MaxPages > 0 && pagesFetched >= args.MaxPages {
 			break
 		}
@@ -140,7 +122,7 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 			return fmt.Errorf("terminated")
 		default:
 		}
-		// Build request URL with since parameter
+
 		endpoint := fmt.Sprintf("/streams/symbol/%s.json", ticker)
 		v := url.Values{}
 		if latestID > 0 {
@@ -150,11 +132,12 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 		if len(v) > 0 {
 			reqURL += "?" + v.Encode()
 		}
-		// Create and send request using the resolved RapidAPI host and key
+
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 		req.Header.Set("X-RapidAPI-Host", host)
 		req.Header.Set("X-RapidAPI-Key", apiKey)
 		req.Header.Set("User-Agent", "ingest-social-go/1.0")
+
 		resp, err := client.Do(req)
 		if err != nil {
 			emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("HTTP error: %v", err)})
@@ -163,12 +146,11 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
-			// Non‑200 responses may indicate invalid parameters or quota
 			err := fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
 			emitMeta("job_failed", map[string]any{"reason": err.Error()})
 			return err
 		}
-		// Parse JSON
+
 		var parsed struct {
 			Messages []struct {
 				ID        int64  `json:"id"`
@@ -198,26 +180,29 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 			emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("unmarshal: %v", err)})
 			return err
 		}
-		// If no messages returned we are up‑to‑date
+
 		if len(parsed.Messages) == 0 {
 			break
 		}
-		// Process each message
+
+		// Track the minimum ID seen on THIS page
+		var pageMinID int64
+
 		for _, msg := range parsed.Messages {
-			// Stop if until-id flag dictates we should not process further
+			// honor until-id
 			if args.UntilID > 0 && msg.ID <= args.UntilID {
-				// break out of outer loops
-				pagesFetched = args.MaxPages // set to end
+				pagesFetched = args.MaxPages // force outer break
 				break
 			}
-			// Convert symbols to []string
+
+			// symbols -> []string
 			var syms []string
 			for _, s := range msg.Symbols {
 				if s.Symbol != "" {
 					syms = append(syms, strings.ToUpper(s.Symbol))
 				}
 			}
-			// Sentiment is optional
+
 			sentiment := msg.Entities.Sentiment.Basic
 			rec := map[string]any{
 				"stage":         StageRaw,
@@ -236,26 +221,40 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 				"user_id":       msg.User.ID,
 				"user_username": msg.User.Username,
 			}
+
 			rowKey := strconv.FormatInt(msg.ID, 10)
 			if err := pub.AddRecord(source, ticker, rowKey, rec); err != nil {
 				emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("publish: %v", err)})
 				return err
 			}
 			processedCount++
+
+			// update latest / pageMin
 			if msg.ID > latestID {
 				latestID = msg.ID
 			}
+			if pageMinID == 0 || msg.ID < pageMinID {
+				pageMinID = msg.ID
+			}
 		}
+
 		pagesFetched++
-		// Update state after each page
-		if err := store.UpdateStocktwitsState(ctx, ticker, latestID, 0); err != nil {
+
+		// Merge pageMin into accumulated oldest and persist both values
+		if pageMinID > 0 {
+			if accOldest == 0 || pageMinID < accOldest {
+				accOldest = pageMinID
+			}
+		}
+		if err := store.UpdateStocktwitsState(ctx, ticker, latestID, accOldest); err != nil {
 			emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("state update: %v", err)})
 			return err
 		}
-		// Emit batch_committed event with number of records processed so far
+
 		emitMeta("batch_committed", map[string]any{"records": processedCount})
 	}
-	// On normal completion emit job_completed event with duration
+
+	// Completed
 	durationMs := time.Since(startTime).Milliseconds()
 	emitMeta("job_completed", map[string]any{"duration_ms": durationMs})
 	return nil
