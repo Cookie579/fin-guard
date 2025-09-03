@@ -78,6 +78,17 @@ func NewKinesisPublisher(ctx context.Context, jobID string) (*KinesisPublisher, 
 	return p, nil
 }
 
+func mustYYYYMMDDFromRFC3339(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t.Format("2006-01-02"), nil
+	}
+	if len(s) >= 10 && s[4] == '-' && s[7] == '-' {
+		return s[:10], nil
+	}
+	return "", fmt.Errorf("invalid date: %q", s)
+}
+
 // computeSuffix returns a hexadecimal suffix computed from jobID and rowKey.
 func computeSuffix(jobID, rowKey string) string {
 	h := fnv.New32a()
@@ -107,54 +118,47 @@ func (p *KinesisPublisher) AddRecord(source, ticker, rowKey string, payload map[
 		return errors.New("nil payload")
 	}
 
-	var (
-		b   []byte
-		err error
-	)
-
+	// Strictly enforce a partitionable date for Stocktwits
 	if source == "stocktwits" {
-		// 1) Marshal the raw incoming map to JSON
-		raw, err2 := json.Marshal(payload)
-		if err2 != nil {
-			return fmt.Errorf("marshal stocktwits raw: %w", err2)
+		// Expect created_at to be a string
+		v, ok := payload["created_at"]
+		createdAt, ok2 := v.(string)
+		if !ok || !ok2 || createdAt == "" {
+			return fmt.Errorf("stocktwits: missing or non-string created_at (got %T)", v)
 		}
-		// 2) Build the slim envelope (adds filingDate, trims fields)
-		env, err2 := MakeStocktwitsEnvelopeFromJSON(raw, ticker)
-		if err2 != nil {
-			// Fallback to original if the shape is unexpected — don't drop data
-			b = raw
-		} else {
-			b, err2 = json.Marshal(env)
-			if err2 != nil {
-				return fmt.Errorf("marshal stocktwits envelope: %w", err2)
-			}
-		}
-		// Stocktwits payloads should be small; skip description-based truncation.
-		if len(b) > 900_000 {
-			return fmt.Errorf("stocktwits envelope unexpectedly large (%d bytes)", len(b))
-		}
-	} else {
-		// Non-Stocktwits: preserve existing behavior (including 'description' truncation)
-		b, err = json.Marshal(payload)
+		fd, err := mustYYYYMMDDFromRFC3339(createdAt)
 		if err != nil {
-			return fmt.Errorf("marshal payload: %w", err)
+			return fmt.Errorf("stocktwits: %w", err) // fail fast — you asked for strict
+		}
+		payload["filingDate"] = fd // Firehose JQ will read this
+	}
+
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal payload: %w", err)
+	}
+
+	// (Keep your size-guard for non-ST sources as-is if you want)
+	if len(b) > 900_000 {
+		if desc, ok := payload["description"].(string); ok && len(desc) > 0 {
+			maxDesc := 800_000
+			if len(desc) > maxDesc {
+				payload["description"] = desc[:maxDesc]
+			}
+			payload["truncated"] = true
+			b, err = json.Marshal(payload)
+			if err != nil {
+				return fmt.Errorf("marshal truncated payload: %w", err)
+			}
 		}
 		if len(b) > 900_000 {
-			if desc, ok := payload["description"].(string); ok && len(desc) > 0 {
-				maxDesc := 800_000
-				if len(desc) > maxDesc {
-					payload["description"] = desc[:maxDesc]
-				}
-				payload["truncated"] = true
-				b, err = json.Marshal(payload)
-				if err != nil {
-					return fmt.Errorf("marshal truncated payload: %w", err)
-				}
-			}
-			if len(b) > 900_000 {
-				return fmt.Errorf("payload too large after truncation (%d bytes)", len(b))
-			}
+			return fmt.Errorf("payload too large after truncation (%d bytes)", len(b))
 		}
+	}
+
+	// Optional: dump a sample of the exact JSON we send (helps verify)
+	if os.Getenv("KIN_DEBUG_DUMP") == "1" && rand.Intn(30) == 0 {
+		fmt.Fprintf(os.Stdout, "KIN_PAYLOAD %s\n", string(b))
 	}
 
 	pk := p.buildPartitionKey(source, ticker, rowKey)
