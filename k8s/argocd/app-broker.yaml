@@ -1,3 +1,4 @@
+# argoCD/app-broker.yaml
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -7,10 +8,11 @@ spec:
   project: default
   source:
     repoURL: https://github.com/Cookie579/fin-guard
-    targetRevision: HEAD
-    path: helm/broker
+    targetRevision: main         # or your branch
+    path: k8s/helm/broker        # <-- update this
     helm:
       values: |
+        namespace: default
         redisAddr: "redis:6379"
         stocktwits:
           host: "stocktwits.p.rapidapi.com"
@@ -19,7 +21,7 @@ spec:
           maxInflight: "1"
           keysFromSecret:
             name: preprocess-config
-            key: rapidapi_keys
+            key: RAPIDAPI_STOCKTWITS_KEYS_JSON
   destination:
     server: https://kubernetes.default.svc
     namespace: default
