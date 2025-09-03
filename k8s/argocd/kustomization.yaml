@@ -6,3 +6,4 @@ resources:
   - ghcr-creds.yaml
   - repo-creds.yaml
   - argocd-cm-patch.yaml
+  - app-broker.yaml

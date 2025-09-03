@@ -1,0 +1,27 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: rate-broker
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Cookie579/fin-guard
+    targetRevision: HEAD
+    path: helm/broker
+    helm:
+      values: |
+        redisAddr: "redis:6379"
+        stocktwits:
+          host: "stocktwits.p.rapidapi.com"
+          ratePerSec: "0.2777778"
+          burst: "10"
+          maxInflight: "1"
+          keysFromSecret:
+            name: preprocess-config
+            key: rapidapi_keys
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: default
+  syncPolicy:
+    automated: { prune: true, selfHeal: true }

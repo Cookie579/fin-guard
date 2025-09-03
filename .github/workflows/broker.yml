@@ -1,0 +1,31 @@
+name: Build & Push Rate Broker
+
+on:
+  push:
+    paths:
+      - "broker/**"
+      - "broker/Dockerfile"
+      - ".github/workflows/rate-broker.yml"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_PAT }}
+      - uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: broker/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/cookie579/rate-broker:latest
+            ghcr.io/cookie579/rate-broker:${{ github.sha }}
+            ghcr.io/cookie579/rate-broker:${{ github.ref_name }}

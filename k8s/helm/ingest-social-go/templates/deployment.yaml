@@ -45,6 +45,8 @@ spec:
               value: {{ .Values.aws.region | default "us-east-1" | quote }}
             - name: CONFIG_SECRET
               value: {{ .Values.configSecret | default "preprocess-config" | quote }}
+            - name: RATE_BROKER_URL
+              value: "http://rate-broker.default.svc.cluster.local:8080"
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

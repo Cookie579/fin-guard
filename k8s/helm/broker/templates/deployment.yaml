@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rate-broker
+  namespace: {{ .Values.namespace }}
+  labels: { app: rate-broker }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: rate-broker }
+  template:
+    metadata:
+      labels: { app: rate-broker }
+    spec:
+      containers:
+      - name: broker
+        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+        imagePullPolicy: {{ .Values.image.pullPolicy | default "Always" }}
+        ports:
+        - containerPort: 8080
+        env:
+        - name: REDIS_ADDR
+          value: "{{ .Values.redisAddr }}"
+        - name: STOCKTWITS_HOST
+          value: "{{ .Values.stocktwits.host }}"
+        - name: STOCKTWITS_RATE_PER_SEC
+          value: "{{ .Values.stocktwits.ratePerSec }}"
+        - name: STOCKTWITS_BURST
+          value: "{{ .Values.stocktwits.burst }}"
+        - name: STOCKTWITS_MAX_INFLIGHT
+          value: "{{ .Values.stocktwits.maxInflight }}"
+        {{- if .Values.stocktwits.keysFromSecret }}
+        - name: rapidapi_keys
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.stocktwits.keysFromSecret.name }}
+              key:  {{ .Values.stocktwits.keysFromSecret.key }}
+        {{- else if .Values.stocktwits.keysFromConfigMap }}
+        - name: rapidapi_keys
+          valueFrom:
+            configMapKeyRef:
+              name: {{ .Values.stocktwits.keysFromConfigMap.name }}
+              key:  {{ .Values.stocktwits.keysFromConfigMap.key }}
+        {{- else }}
+        # Fallback: you must provide keys via values!
+        - name: rapidapi_keys
+          value: '["REPLACE_ME"]'
+        {{- end }}
+        readinessProbe:
+          httpGet: { path: /healthz, port: 8080 }
+          initialDelaySeconds: 3
+          periodSeconds: 5
+        livenessProbe:
+          httpGet: { path: /healthz, port: 8080 }
+          initialDelaySeconds: 10
+          periodSeconds: 10
