@@ -106,36 +106,69 @@ func (p *KinesisPublisher) AddRecord(source, ticker, rowKey string, payload map[
 	if payload == nil {
 		return errors.New("nil payload")
 	}
-	b, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("marshal payload: %w", err)
-	}
-	if len(b) > 900_000 {
-		if desc, ok := payload["description"].(string); ok && len(desc) > 0 {
-			maxDesc := 800_000
-			if len(desc) > maxDesc {
-				payload["description"] = desc[:maxDesc]
+
+	var (
+		b   []byte
+		err error
+	)
+
+	if source == "stocktwits" {
+		// 1) Marshal the raw incoming map to JSON
+		raw, err2 := json.Marshal(payload)
+		if err2 != nil {
+			return fmt.Errorf("marshal stocktwits raw: %w", err2)
+		}
+		// 2) Build the slim envelope (adds filingDate, trims fields)
+		env, err2 := MakeStocktwitsEnvelopeFromJSON(raw, ticker)
+		if err2 != nil {
+			// Fallback to original if the shape is unexpected — don't drop data
+			b = raw
+		} else {
+			b, err2 = json.Marshal(env)
+			if err2 != nil {
+				return fmt.Errorf("marshal stocktwits envelope: %w", err2)
 			}
-			payload["truncated"] = true
-			b, err = json.Marshal(payload)
-			if err != nil {
-				return fmt.Errorf("marshal truncated payload: %w", err)
-			}
+		}
+		// Stocktwits payloads should be small; skip description-based truncation.
+		if len(b) > 900_000 {
+			return fmt.Errorf("stocktwits envelope unexpectedly large (%d bytes)", len(b))
+		}
+	} else {
+		// Non-Stocktwits: preserve existing behavior (including 'description' truncation)
+		b, err = json.Marshal(payload)
+		if err != nil {
+			return fmt.Errorf("marshal payload: %w", err)
 		}
 		if len(b) > 900_000 {
-			return fmt.Errorf("payload too large after truncation (%d bytes)", len(b))
+			if desc, ok := payload["description"].(string); ok && len(desc) > 0 {
+				maxDesc := 800_000
+				if len(desc) > maxDesc {
+					payload["description"] = desc[:maxDesc]
+				}
+				payload["truncated"] = true
+				b, err = json.Marshal(payload)
+				if err != nil {
+					return fmt.Errorf("marshal truncated payload: %w", err)
+				}
+			}
+			if len(b) > 900_000 {
+				return fmt.Errorf("payload too large after truncation (%d bytes)", len(b))
+			}
 		}
 	}
+
 	pk := p.buildPartitionKey(source, ticker, rowKey)
 	entry := types.PutRecordsRequestEntry{
 		Data:         b,
 		PartitionKey: aws.String(pk),
 	}
+
 	p.mu.Lock()
 	p.batch = append(p.batch, entry)
 	p.batchBytes += len(b) + len(pk)
 	shouldFlush := len(p.batch) >= KinMaxRecords || p.batchBytes >= KinMaxBytes
 	p.mu.Unlock()
+
 	if shouldFlush {
 		return p.flush(p.ctx)
 	}
