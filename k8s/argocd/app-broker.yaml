@@ -21,7 +21,7 @@ spec:
           maxInflight: "1"
           keysFromSecret:
             name: preprocess-config
-            key: RAPIDAPI_STOCKTWITS_KEYS_JSON
+            key: rapidapi_keys
   destination:
     server: https://kubernetes.default.svc
     namespace: default
