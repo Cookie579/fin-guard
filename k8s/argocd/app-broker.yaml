@@ -8,8 +8,8 @@ spec:
   project: default
   source:
     repoURL: https://github.com/Cookie579/fin-guard
-    targetRevision: main         # or your branch
-    path: k8s/helm/broker        # <-- update this
+    targetRevision: main         
+    path: k8s/helm/broker        
     helm:
       values: |
         namespace: default
