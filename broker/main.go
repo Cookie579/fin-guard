@@ -123,10 +123,10 @@ func newServer() *Server {
 			maxInf = n
 		}
 	}
-	host := getEnv("STOCKTWITS_HOST", "stocktwits2.p.rapidapi.com")
-	keys := parseKeysJSON("STOCKTWITS_KEYS_JSON")
+	host := getEnv("STOCKTWITS_HOST", "stocktwits.p.rapidapi.com")
+	keys := parseKeysJSON("rapidapi_keys")
 	if len(keys) == 0 {
-		log.Fatalf("no keys provided in STOCKTWITS_KEYS_JSON")
+		log.Fatalf("no keys provided in rapidapi_keys")
 	}
 
 	cfg := &APIConfig{
