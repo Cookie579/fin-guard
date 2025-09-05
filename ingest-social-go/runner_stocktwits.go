@@ -47,7 +47,7 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 		}
 	}
 
-	emitMeta("job_started", map[string]any{})
+	emitMeta("job_started", nil)
 
 	if err := store.AcquireLock(ctx, source, ticker, ownerID, jobID); err != nil {
 		if errors.Is(err, ErrLockNotAcquired) {
@@ -86,6 +86,7 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 	}
 
 	client := &http.Client{Timeout: 45 * time.Second}
+
 	var processedCount int
 	startTime := time.Now()
 	pagesFetched := 0
@@ -101,61 +102,58 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 		default:
 		}
 
-		// Build endpoint
 		endpoint := fmt.Sprintf("/streams/symbol/%s.json", ticker)
-		reqURL := endpoint
+		q := url.Values{}
 		if latestID > 0 {
-			v := url.Values{}
-			v.Set("since", strconv.FormatInt(latestID, 10))
-			reqURL += "?" + v.Encode()
+			q.Set("since", strconv.FormatInt(latestID, 10))
 		}
 
-		// === Acquire a permit from the broker ===
+		// === NEW: acquire a permit from the broker ===
 		lease, err := acquirePermit(ctx, "stocktwits")
 		if err != nil {
 			emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("broker acquire: %v", err)})
 			return err
 		}
-		fullURL := "https://" + lease.Host + reqURL
 
-		// Request using the host/key returned by the broker
-		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
-		req.Header.Set("X-RapidAPI-Host", lease.Host) // e.g., stocktwits.p.rapidapi.com
+		// Build URL using the host returned by the broker
+		reqURL := "https://" + lease.Host + endpoint
+		if len(q) > 0 {
+			reqURL += "?" + q.Encode()
+		}
+
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+		req.Header.Set("X-RapidAPI-Host", lease.Host)
 		req.Header.Set("X-RapidAPI-Key", lease.Key)
 		req.Header.Set("User-Agent", "ingest-social-go/1.0")
 
-		resp, err := client.Do(req)
+		// Always report the result for this lease (success/failure)
+		var status int
+		var retryAfterMs int
 		var body []byte
-		if err == nil {
-			body, _ = io.ReadAll(resp.Body)
-			resp.Body.Close()
-		}
 
-		// Always report to broker
-		ok := err == nil && resp != nil && resp.StatusCode == http.StatusOK
-		status := 0
-		retryAfter := ""
+		resp, doErr := client.Do(req)
 		if resp != nil {
 			status = resp.StatusCode
-			retryAfter = resp.Header.Get("Retry-After")
+			retryAfterMs = parseRetryAfterMs(resp.Header.Get("Retry-After"), time.Now())
+			b, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			body = b
 		}
-		reportResult(ctx, lease.LeaseID, ok, status, retryAfter)
 
-		if err != nil {
-			emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("HTTP error: %v", err)})
-			return err
+		ok := (doErr == nil && status == http.StatusOK)
+		reportResult(ctx, lease.ID, ok, status, retryAfterMs)
+
+		if doErr != nil {
+			emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("HTTP error: %v", doErr)})
+			return doErr
 		}
-		if resp.StatusCode == http.StatusTooManyRequests {
-			emitMeta("job_failed", map[string]any{"reason": "rate-limited"})
-			return fmt.Errorf("rate-limited")
-		}
-		if resp.StatusCode != http.StatusOK {
-			err := fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+		if status != http.StatusOK {
+			err := fmt.Errorf("HTTP %d: %s", status, string(body))
 			emitMeta("job_failed", map[string]any{"reason": err.Error()})
 			return err
 		}
 
-		// Parse payload (unchanged)
+		// Parse JSON
 		var parsed struct {
 			Messages []struct {
 				ID        int64  `json:"id"`
@@ -188,6 +186,7 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 		if len(parsed.Messages) == 0 {
 			break
 		}
+
 		for _, msg := range parsed.Messages {
 			if args.UntilID > 0 && msg.ID <= args.UntilID {
 				pagesFetched = args.MaxPages
@@ -227,13 +226,16 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 				latestID = msg.ID
 			}
 		}
-		pagesFetched++
 
+		pagesFetched++
 		if err := store.UpdateStocktwitsState(ctx, ticker, latestID, 0); err != nil {
 			emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("state update: %v", err)})
 			return err
 		}
 		emitMeta("batch_committed", map[string]any{"records": processedCount})
+
+		// tiny jitter to avoid convoy after a permit
+		time.Sleep(50 * time.Millisecond)
 	}
 
 	durationMs := time.Since(startTime).Milliseconds()
