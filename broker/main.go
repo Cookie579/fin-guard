@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -59,77 +58,31 @@ type reportReq struct {
 	RetryAfterMs int    `json:"retry_after_ms,omitempty"`
 }
 
-func mustEnv(name string) string {
-	v := strings.TrimSpace(os.Getenv(name))
-	if v == "" {
-		log.Fatalf("missing required env %s", name)
-	}
-	return v
-}
-func getEnv(name, def string) string {
-	v := strings.TrimSpace(os.Getenv(name))
-	if v == "" {
-		return def
-	}
-	return v
-}
-func parseKeysJSON(env string) []string {
-	raw := strings.TrimSpace(os.Getenv(env))
-	if raw == "" {
-		return nil
-	}
-	var keys []string
-	if raw[0] == '[' {
-		if err := json.Unmarshal([]byte(raw), &keys); err != nil {
-			log.Fatalf("invalid %s JSON: %v", env, err)
-		}
-	} else {
-		for _, p := range strings.Split(raw, ",") {
-			if s := strings.TrimSpace(p); s != "" {
-				keys = append(keys, s)
-			}
-		}
-	}
-	return keys
-}
-
 func newServer() *Server {
-	// Redis
+	// Load file-backed config (no envs)
+	cfg, err := LoadConfig()
+	if err != nil {
+		log.Fatalf("load config.json: %v", err)
+	}
+
+	// Redis client
 	rdb := redis.NewClient(&redis.Options{
-		Addr:     mustEnv("REDIS_ADDR"), // "host:6379"
-		Password: getEnv("REDIS_PASSWORD", ""),
-		DB:       0,
+		Addr: GetRedisAddr(cfg), // defaults to "redis:6379" if not set in config.json
+		DB:   0,
 	})
 	if err := rdb.Ping(context.Background()).Err(); err != nil {
 		log.Fatalf("redis ping failed: %v", err)
 	}
 
-	// STOCKTWITS config via env
-	rate := 0.2777778
-	if v := getEnv("STOCKTWITS_RATE_PER_SEC", ""); v != "" {
-		if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 {
-			rate = f
-		}
-	}
-	burst := 10
-	if v := getEnv("STOCKTWITS_BURST", ""); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			burst = n
-		}
-	}
-	maxInf := 1
-	if v := getEnv("STOCKTWITS_MAX_INFLIGHT", ""); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			maxInf = n
-		}
-	}
-	host := getEnv("STOCKTWITS_HOST", "stocktwits.p.rapidapi.com")
-	keys := parseKeysJSON("rapidapi_keys")
-	if len(keys) == 0 {
-		log.Fatalf("no keys provided in rapidapi_keys")
+	// Stocktwits rate/host/keys from config.json
+	host := GetStocktwitsHost(cfg)                // default "stocktwits.p.rapidapi.com"
+	rate, burst, maxInf := GetStocktwitsRate(cfg) // defaults 0.2777778, 10, 1
+	keys, err := LoadRapidAPIKeys()               // required: config.json.rapidapi_keys
+	if err != nil || len(keys) == 0 {
+		log.Fatalf("rapidapi keys: %v", err)
 	}
 
-	cfg := &APIConfig{
+	apiCfg := &APIConfig{
 		Name:        "stocktwits",
 		Host:        host,
 		RatePerSec:  rate,
@@ -138,7 +91,7 @@ func newServer() *Server {
 		Keys:        keys,
 	}
 
-	// Load scripts
+	// Load Lua scripts
 	ctx := context.Background()
 	acqSHA, err := rdb.ScriptLoad(ctx, acquireLua).Result()
 	if err != nil {
@@ -151,7 +104,7 @@ func newServer() *Server {
 
 	return &Server{
 		rdb:      rdb,
-		apis:     map[string]*APIConfig{"stocktwits": cfg},
+		apis:     map[string]*APIConfig{"stocktwits": apiCfg},
 		acqSHA:   acqSHA,
 		repSHA:   repSHA,
 		rrKeyFmt: "rl:%s:rr",
@@ -179,6 +132,7 @@ func (s *Server) acquire(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+
 	n := len(cfg.Keys)
 	now := time.Now().Unix()
 	start := 0
@@ -295,14 +249,15 @@ func writeJSON(w http.ResponseWriter, v any) {
 
 func main() {
 	s := newServer()
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/acquire", s.acquire)
 	mux.HandleFunc("/v1/report", s.report)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(204) })
 
-	addr := getEnv("LISTEN_ADDR", ":8080")
-	log.Printf("rate-broker listening on %s", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	const listenAddr = ":8080" // no envs; fixed listen address
+	log.Printf("rate-broker listening on %s", listenAddr)
+	if err := http.ListenAndServe(listenAddr, mux); err != nil {
 		log.Fatal(err)
 	}
 }
