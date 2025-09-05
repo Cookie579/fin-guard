@@ -9,6 +9,9 @@ image:
   repository: ghcr.io/cookie579/ingest-social-go
   tag: latest
   pullPolicy: Always
+  env:
+  - name: KIN_DEBUG_DUMP
+    value: "1"
 
 serviceAccount:
   # Name of the ServiceAccount used by the orchestrator Deployment and also

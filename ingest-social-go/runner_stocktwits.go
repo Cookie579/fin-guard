@@ -16,7 +16,6 @@ import (
 )
 
 // RunStocktwitsJob orchestrates one StockTwits ingest job.
-// RunStocktwitsJob orchestrates one StockTwits ingest job.
 func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stocktwitsArgs) error {
 	ticker := strings.ToUpper(args.Ticker)
 	source := "stocktwits"
@@ -50,6 +49,7 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 
 	emitMeta("job_started", nil)
 
+	// Acquire lock
 	if err := store.AcquireLock(ctx, source, ticker, ownerID, jobID); err != nil {
 		if errors.Is(err, ErrLockNotAcquired) {
 			return err
@@ -60,6 +60,7 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 	fmt.Printf("LOCK_ACQUIRED job_id=%s pk=%s#%s\n", jobID, source, strings.ToUpper(ticker))
 	defer func() { _ = store.ReleaseLock(context.Background(), source, ticker, ownerID) }()
 
+	// Heartbeat the lock
 	hbCtx, hbCancel := context.WithCancel(ctx)
 	go func() {
 		t := time.NewTicker(time.Duration(LockHeartbeatSeconds) * time.Second)
@@ -77,7 +78,7 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 	}()
 	defer hbCancel()
 
-	// Load current state once; we hold the lock so no one else will modify it.
+	// Load current state
 	latestID, existingOldest, err := store.GetStocktwitsState(ctx, ticker)
 	if err != nil {
 		emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("state load: %v", err)})
@@ -105,33 +106,37 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 
 		endpoint := fmt.Sprintf("/streams/symbol/%s.json", ticker)
 		q := url.Values{}
-		if latestID > 0 {
+
+		// ── Seed mode: on the very first page, if oldest_id is 0, fetch WITHOUT 'since'
+		// to initialize oldest. Otherwise, use 'since=latestID'.
+		seedMode := (pagesFetched == 0 && existingOldest == 0)
+		if !seedMode && latestID > 0 {
 			q.Set("since", strconv.FormatInt(latestID, 10))
 		}
 
-		// Acquire a permit from the broker
+		// Acquire broker permit
 		lease, err := acquirePermit(ctx, "stocktwits")
 		if err != nil {
 			emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("broker acquire: %v", err)})
 			return err
 		}
 
-		// Build URL using the host returned by the broker
+		// Build request
 		reqURL := "https://" + lease.Host + endpoint
 		if len(q) > 0 {
 			reqURL += "?" + q.Encode()
 		}
-
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 		req.Header.Set("X-RapidAPI-Host", lease.Host)
 		req.Header.Set("X-RapidAPI-Key", lease.Key)
 		req.Header.Set("User-Agent", "ingest-social-go/1.0")
 
-		// Always report the result for this lease (success/failure)
-		var status int
-		var retryAfterMs int
-		var body []byte
-
+		// Make request
+		var (
+			status       int
+			retryAfterMs int
+			body         []byte
+		)
 		resp, doErr := client.Do(req)
 		if resp != nil {
 			status = resp.StatusCode
@@ -140,10 +145,8 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 			resp.Body.Close()
 			body = b
 		}
-
 		ok := (doErr == nil && status == http.StatusOK)
 		reportResult(ctx, lease.ID, ok, status, retryAfterMs)
-
 		if doErr != nil {
 			emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("HTTP error: %v", doErr)})
 			return doErr
@@ -184,23 +187,37 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 			emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("unmarshal: %v", err)})
 			return err
 		}
+
+		// If no messages:
 		if len(parsed.Messages) == 0 {
+			// Seed oldest to latest if we have a known latest but couldn't fetch any messages.
+			if seedMode && latestID > 0 {
+				if err := store.UpdateStocktwitsState(ctx, ticker, latestID, latestID); err != nil {
+					emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("state seed: %v", err)})
+					return err
+				}
+			}
 			break
 		}
 
-		// Track the smallest ID we saw on THIS page (no shadowing).
-		minIDThisBatch := int64(0)
+		// Track min eligible ID this page (eligible = strictly newer than latestID when in seed mode)
+		minEligible := int64(0)
 
 		for _, msg := range parsed.Messages {
-			// update page min
-			if minIDThisBatch == 0 || msg.ID < minIDThisBatch {
-				minIDThisBatch = msg.ID
+			// If we are seeding and this message is not newer than our latest, skip publishing it.
+			if seedMode && latestID > 0 && msg.ID <= latestID {
+				continue
 			}
 
 			// stop early if we crossed UntilID
 			if args.UntilID > 0 && msg.ID <= args.UntilID {
 				pagesFetched = args.MaxPages
 				break
+			}
+
+			// eligible min (earliest "new" message we actually publish)
+			if minEligible == 0 || msg.ID < minEligible {
+				minEligible = msg.ID
 			}
 
 			var syms []string
@@ -240,23 +257,26 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 
 		pagesFetched++
 
-		// Only initialize oldest_id once: if it was 0 before and we saw any messages,
-		// set it to the smallest ID from this page; otherwise leave it unchanged.
+		// Initialize oldest if needed
 		newOldest := existingOldest
-		if newOldest == 0 && minIDThisBatch > 0 {
-			newOldest = minIDThisBatch
+		if newOldest == 0 {
+			if minEligible > 0 {
+				newOldest = minEligible
+			} else if latestID > 0 {
+				// No eligible messages (all were <= latest) — seed to latest to avoid 0
+				newOldest = latestID
+			}
 		}
 
 		if err := store.UpdateStocktwitsState(ctx, ticker, latestID, newOldest); err != nil {
 			emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("state update: %v", err)})
 			return err
 		}
-		// carry forward for the next page in this same job
 		existingOldest = newOldest
 
 		emitMeta("batch_committed", map[string]any{"records": processedCount})
 
-		// tiny jitter to avoid convoy after a permit
+		// small jitter
 		time.Sleep(50 * time.Millisecond)
 	}
 
