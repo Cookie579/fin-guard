@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -18,7 +19,15 @@ const defaultBrokerURL = "http://rate-broker.default.svc:8080"
 func brokerURL() string {
 	// If you later add config.json support, read from there.
 	// For now, rely on the ClusterIP service DNS name:
-	return defaultBrokerURL
+	// return defaultBrokerURL
+	if v := os.Getenv("RATE_BROKER_URL"); v != "" {
+		return v
+	}
+	// If we're inside k8s, the ClusterIP name is fine; otherwise prefer localhost
+	if _, err := os.Stat("/var/run/secrets/kubernetes.io"); err == nil {
+		return defaultBrokerURL
+	}
+	return "http://localhost:8080"
 }
 
 type brokerAcquireReq struct {

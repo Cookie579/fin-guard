@@ -16,6 +16,7 @@ import (
 )
 
 // RunStocktwitsJob orchestrates one StockTwits ingest job.
+// RunStocktwitsJob orchestrates one StockTwits ingest job.
 func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stocktwitsArgs) error {
 	ticker := strings.ToUpper(args.Ticker)
 	source := "stocktwits"
@@ -76,7 +77,8 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 	}()
 	defer hbCancel()
 
-	latestID, _, err := store.GetStocktwitsState(ctx, ticker)
+	// Load current state once; we hold the lock so no one else will modify it.
+	latestID, existingOldest, err := store.GetStocktwitsState(ctx, ticker)
 	if err != nil {
 		emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("state load: %v", err)})
 		return err
@@ -86,7 +88,6 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 	}
 
 	client := &http.Client{Timeout: 45 * time.Second}
-
 	var processedCount int
 	startTime := time.Now()
 	pagesFetched := 0
@@ -108,7 +109,7 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 			q.Set("since", strconv.FormatInt(latestID, 10))
 		}
 
-		// === NEW: acquire a permit from the broker ===
+		// Acquire a permit from the broker
 		lease, err := acquirePermit(ctx, "stocktwits")
 		if err != nil {
 			emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("broker acquire: %v", err)})
@@ -187,11 +188,21 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 			break
 		}
 
+		// Track the smallest ID we saw on THIS page (no shadowing).
+		minIDThisBatch := int64(0)
+
 		for _, msg := range parsed.Messages {
+			// update page min
+			if minIDThisBatch == 0 || msg.ID < minIDThisBatch {
+				minIDThisBatch = msg.ID
+			}
+
+			// stop early if we crossed UntilID
 			if args.UntilID > 0 && msg.ID <= args.UntilID {
 				pagesFetched = args.MaxPages
 				break
 			}
+
 			var syms []string
 			for _, s := range msg.Symbols {
 				if s.Symbol != "" {
@@ -228,10 +239,21 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 		}
 
 		pagesFetched++
-		if err := store.UpdateStocktwitsState(ctx, ticker, latestID, 0); err != nil {
+
+		// Only initialize oldest_id once: if it was 0 before and we saw any messages,
+		// set it to the smallest ID from this page; otherwise leave it unchanged.
+		newOldest := existingOldest
+		if newOldest == 0 && minIDThisBatch > 0 {
+			newOldest = minIDThisBatch
+		}
+
+		if err := store.UpdateStocktwitsState(ctx, ticker, latestID, newOldest); err != nil {
 			emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("state update: %v", err)})
 			return err
 		}
+		// carry forward for the next page in this same job
+		existingOldest = newOldest
+
 		emitMeta("batch_committed", map[string]any{"records": processedCount})
 
 		// tiny jitter to avoid convoy after a permit
