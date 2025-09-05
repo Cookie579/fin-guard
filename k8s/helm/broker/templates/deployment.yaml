@@ -2,50 +2,32 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: rate-broker
-  namespace: {{ .Values.namespace }}
+  namespace: {{ .Values.namespace | default "default" }}
   labels: { app: rate-broker }
 spec:
-  replicas: 2
+  replicas: {{ .Values.replicas | default 2 }}
   selector:
     matchLabels: { app: rate-broker }
   template:
     metadata:
       labels: { app: rate-broker }
     spec:
+      {{- if .Values.image.pullSecret }}
+      imagePullSecrets:
+        - name: {{ .Values.image.pullSecret }}
+      {{- end }}
       containers:
       - name: broker
         image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
         imagePullPolicy: {{ .Values.image.pullPolicy | default "Always" }}
         ports:
-        - containerPort: 8080
-        env:
-        - name: REDIS_ADDR
-          value: "{{ .Values.redisAddr }}"
-        - name: STOCKTWITS_HOST
-          value: "{{ .Values.stocktwits.host }}"
-        - name: STOCKTWITS_RATE_PER_SEC
-          value: "{{ .Values.stocktwits.ratePerSec }}"
-        - name: STOCKTWITS_BURST
-          value: "{{ .Values.stocktwits.burst }}"
-        - name: STOCKTWITS_MAX_INFLIGHT
-          value: "{{ .Values.stocktwits.maxInflight }}"
-        {{- if .Values.stocktwits.keysFromSecret }}
-        - name: rapidapi_keys
-          valueFrom:
-            secretKeyRef:
-              name: {{ .Values.stocktwits.keysFromSecret.name }}
-              key:  {{ .Values.stocktwits.keysFromSecret.key }}
-        {{- else if .Values.stocktwits.keysFromConfigMap }}
-        - name: rapidapi_keys
-          valueFrom:
-            configMapKeyRef:
-              name: {{ .Values.stocktwits.keysFromConfigMap.name }}
-              key:  {{ .Values.stocktwits.keysFromConfigMap.key }}
-        {{- else }}
-        # Fallback: you must provide keys via values!
-        - name: rapidapi_keys
-          value: '["REPLACE_ME"]'
-        {{- end }}
+        - name: http
+          containerPort: 8080
+        # No env at all — broker reads /app/config.json
+        volumeMounts:
+        - name: preprocess-config
+          mountPath: /app
+          readOnly: true
         readinessProbe:
           httpGet: { path: /healthz, port: 8080 }
           initialDelaySeconds: 3
@@ -54,3 +36,10 @@ spec:
           httpGet: { path: /healthz, port: 8080 }
           initialDelaySeconds: 10
           periodSeconds: 10
+      volumes:
+      - name: preprocess-config
+        secret:
+          secretName: {{ .Values.preprocessConfig.secretName | default "preprocess-config" }}
+          items:
+          - key: {{ .Values.preprocessConfig.secretKey | default "config.json" }}
+            path: config.json

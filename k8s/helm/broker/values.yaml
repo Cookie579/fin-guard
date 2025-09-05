@@ -1,15 +1,11 @@
+namespace: default
+replicas: 2
+
 image:
   repository: ghcr.io/cookie579/rate-broker
   tag: latest
   pullPolicy: Always
 
-redisAddr: "redis:6379"                     
-stocktwits:
-  host: "stocktwits.p.rapidapi.com"
-  ratePerSec: "0.2777778"
-  burst: "10"
-  maxInflight: "1"
-
-  keysFromSecret:
-    name: preprocess-config
-    key: rapidapi_keys     
+preprocessConfig:
+  secretName: preprocess-config
+  secretKey: config.json
