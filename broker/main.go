@@ -58,6 +58,30 @@ type reportReq struct {
 	RetryAfterMs int    `json:"retry_after_ms,omitempty"`
 }
 
+// --- retrying ping so the broker never crashes on startup if Redis isn't ready ---
+func waitForRedis(ctx context.Context, rdb *redis.Client) {
+	backoff := 1 * time.Second
+	const maxBackoff = 15 * time.Second
+	for {
+		if err := rdb.Ping(ctx).Err(); err == nil {
+			log.Println("connected to Redis")
+			return
+		}
+		log.Printf("waiting for Redis... next try in %v", backoff)
+		select {
+		case <-time.After(backoff):
+		case <-ctx.Done():
+			log.Fatalf("exiting while waiting for Redis: %v", ctx.Err())
+		}
+		if backoff < maxBackoff {
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+		}
+	}
+}
+
 func newServer() *Server {
 	// Load file-backed config (no envs)
 	cfg, err := LoadConfig()
@@ -65,14 +89,13 @@ func newServer() *Server {
 		log.Fatalf("load config.json: %v", err)
 	}
 
-	// Redis client
+	// Redis client (addr should be "127.0.0.1:6379" for sidecar or a real endpoint)
 	rdb := redis.NewClient(&redis.Options{
-		Addr: GetRedisAddr(cfg), // defaults to "redis:6379" if not set in config.json
+		Addr: GetRedisAddr(cfg),
 		DB:   0,
 	})
-	if err := rdb.Ping(context.Background()).Err(); err != nil {
-		log.Fatalf("redis ping failed: %v", err)
-	}
+	// Wait (with backoff) until Redis responds
+	waitForRedis(context.Background(), rdb)
 
 	// Stocktwits rate/host/keys from config.json
 	host := GetStocktwitsHost(cfg)                // default "stocktwits.p.rapidapi.com"
@@ -255,7 +278,7 @@ func main() {
 	mux.HandleFunc("/v1/report", s.report)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(204) })
 
-	const listenAddr = ":8080" // no envs; fixed listen address
+	const listenAddr = ":8080" // fixed listen address
 	log.Printf("rate-broker listening on %s", listenAddr)
 	if err := http.ListenAndServe(listenAddr, mux); err != nil {
 		log.Fatal(err)
