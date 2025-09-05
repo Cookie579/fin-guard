@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-// RunStocktwitsJob orchestrates one StockTwits ingest job.
+// RunStocktwitsJob orchestrates one StockTwits ingest job (forward + backfill).
 func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stocktwitsArgs) error {
 	ticker := strings.ToUpper(args.Ticker)
 	source := "stocktwits"
@@ -46,10 +46,9 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 			log.Printf("WARN: failed to emit %s event: %v", eventType, err)
 		}
 	}
-
 	emitMeta("job_started", nil)
 
-	// Acquire lock
+	// Lock
 	if err := store.AcquireLock(ctx, source, ticker, ownerID, jobID); err != nil {
 		if errors.Is(err, ErrLockNotAcquired) {
 			return err
@@ -60,7 +59,7 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 	fmt.Printf("LOCK_ACQUIRED job_id=%s pk=%s#%s\n", jobID, source, strings.ToUpper(ticker))
 	defer func() { _ = store.ReleaseLock(context.Background(), source, ticker, ownerID) }()
 
-	// Heartbeat the lock
+	// Heartbeat
 	hbCtx, hbCancel := context.WithCancel(ctx)
 	go func() {
 		t := time.NewTicker(time.Duration(LockHeartbeatSeconds) * time.Second)
@@ -78,7 +77,7 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 	}()
 	defer hbCancel()
 
-	// Load current state
+	// Load state
 	latestID, existingOldest, err := store.GetStocktwitsState(ctx, ticker)
 	if err != nil {
 		emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("state load: %v", err)})
@@ -89,9 +88,17 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 	}
 
 	client := &http.Client{Timeout: 45 * time.Second}
-	var processedCount int
 	startTime := time.Now()
+	processedCount := 0
 	pagesFetched := 0
+
+	type pageMode int
+	const (
+		modeForward pageMode = iota
+		modeBackfill
+	)
+	mode := modeForward
+	nextMax := int64(0) // for backfill: next request will use max=nextMax
 
 	for {
 		if args.MaxPages > 0 && pagesFetched >= args.MaxPages {
@@ -104,24 +111,41 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 		default:
 		}
 
+		// Build endpoint + query
 		endpoint := fmt.Sprintf("/streams/symbol/%s.json", ticker)
 		q := url.Values{}
 
-		// ── Seed mode: on the very first page, if oldest_id is 0, fetch WITHOUT 'since'
-		// to initialize oldest. Otherwise, use 'since=latestID'.
-		seedMode := (pagesFetched == 0 && existingOldest == 0)
-		if !seedMode && latestID > 0 {
+		// FIRST: forward mode (newer than latestID).
+		// If we have no oldest yet and it's the first page, do a seed fetch WITHOUT since to initialize oldest.
+		seedMode := (mode == modeForward && pagesFetched == 0 && existingOldest == 0)
+		if mode == modeForward && !seedMode && latestID > 0 {
 			q.Set("since", strconv.FormatInt(latestID, 10))
 		}
 
-		// Acquire broker permit
+		// BACKFILL: walk older pages using max=<id>.
+		if mode == modeBackfill {
+			if nextMax <= 0 {
+				// initialize starting point for backfill
+				if existingOldest > 0 {
+					nextMax = existingOldest - 1
+				} else if latestID > 0 {
+					nextMax = latestID - 1
+				} else {
+					// nothing to backfill from
+					break
+				}
+			}
+			q.Set("max", strconv.FormatInt(nextMax, 10))
+		}
+
+		// Acquire permit from broker
 		lease, err := acquirePermit(ctx, "stocktwits")
 		if err != nil {
 			emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("broker acquire: %v", err)})
 			return err
 		}
 
-		// Build request
+		// Request
 		reqURL := "https://" + lease.Host + endpoint
 		if len(q) > 0 {
 			reqURL += "?" + q.Encode()
@@ -131,12 +155,10 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 		req.Header.Set("X-RapidAPI-Key", lease.Key)
 		req.Header.Set("User-Agent", "ingest-social-go/1.0")
 
-		// Make request
-		var (
-			status       int
-			retryAfterMs int
-			body         []byte
-		)
+		// Do request
+		var status int
+		var retryAfterMs int
+		var body []byte
 		resp, doErr := client.Do(req)
 		if resp != nil {
 			status = resp.StatusCode
@@ -157,7 +179,7 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 			return err
 		}
 
-		// Parse JSON
+		// Parse
 		var parsed struct {
 			Messages []struct {
 				ID        int64  `json:"id"`
@@ -188,36 +210,37 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 			return err
 		}
 
-		// If no messages:
 		if len(parsed.Messages) == 0 {
-			// Seed oldest to latest if we have a known latest but couldn't fetch any messages.
-			if seedMode && latestID > 0 {
-				if err := store.UpdateStocktwitsState(ctx, ticker, latestID, latestID); err != nil {
-					emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("state seed: %v", err)})
-					return err
-				}
+			// Forward finished? Switch to backfill if pages budget remains.
+			if mode == modeForward && (args.MaxPages == 0 || pagesFetched < args.MaxPages) {
+				mode = modeBackfill
+				// initialize nextMax lazily on next iteration
+				continue
 			}
+			// Backfill finished or no pages left
 			break
 		}
 
-		// Track min eligible ID this page (eligible = strictly newer than latestID when in seed mode)
-		minEligible := int64(0)
+		// Track min/max IDs for this page
+		minIDThisPage := int64(0)
+		maxIDThisPage := int64(0)
 
 		for _, msg := range parsed.Messages {
-			// If we are seeding and this message is not newer than our latest, skip publishing it.
+			// If seed fetch returned messages we already have, skip those in forward seed.
 			if seedMode && latestID > 0 && msg.ID <= latestID {
 				continue
 			}
-
-			// stop early if we crossed UntilID
+			// Respect UntilID (stop if we reached/lower than it)
 			if args.UntilID > 0 && msg.ID <= args.UntilID {
-				pagesFetched = args.MaxPages
+				pagesFetched = args.MaxPages // force loop exit
 				break
 			}
 
-			// eligible min (earliest "new" message we actually publish)
-			if minEligible == 0 || msg.ID < minEligible {
-				minEligible = msg.ID
+			if minIDThisPage == 0 || msg.ID < minIDThisPage {
+				minIDThisPage = msg.ID
+			}
+			if msg.ID > maxIDThisPage {
+				maxIDThisPage = msg.ID
 			}
 
 			var syms []string
@@ -250,6 +273,8 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 				return err
 			}
 			processedCount++
+
+			// Only grow latestID (forward/newer side)
 			if msg.ID > latestID {
 				latestID = msg.ID
 			}
@@ -257,15 +282,16 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 
 		pagesFetched++
 
-		// Initialize oldest if needed
+		// State: never clobber oldest with 0; initialize or move older when we saw data
 		newOldest := existingOldest
-		if newOldest == 0 {
-			if minEligible > 0 {
-				newOldest = minEligible
-			} else if latestID > 0 {
-				// No eligible messages (all were <= latest) — seed to latest to avoid 0
-				newOldest = latestID
+		if minIDThisPage > 0 {
+			if newOldest == 0 || minIDThisPage < newOldest {
+				newOldest = minIDThisPage
 			}
+		}
+		if seedMode && newOldest == 0 && latestID > 0 {
+			// Seed fallback (no eligible msgs after skipping <= latest)
+			newOldest = latestID
 		}
 
 		if err := store.UpdateStocktwitsState(ctx, ticker, latestID, newOldest); err != nil {
@@ -276,7 +302,12 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 
 		emitMeta("batch_committed", map[string]any{"records": processedCount})
 
-		// small jitter
+		// Backfill pagination: next page should walk older than the smallest seen
+		if mode == modeBackfill && minIDThisPage > 0 {
+			nextMax = minIDThisPage - 1
+		}
+
+		// tiny jitter
 		time.Sleep(50 * time.Millisecond)
 	}
 
