@@ -1,36 +1,52 @@
-{{- if .Values.embeddedRedis.enabled }}
+{{- $er := .Values.embeddedRedis | default (dict) -}}
+{{- if (default false $er.enabled) }}
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ .Values.embeddedRedis.serviceName | default "redis" }}
-  labels: { app: redis }
+  name: {{ default "redis" $er.serviceName }}
+  labels:
+    app: redis
 spec:
   type: ClusterIP
-  selector: { app: redis }
+  selector:
+    app: redis
   ports:
     - name: redis
-      port: {{ .Values.embeddedRedis.port | default 6379 }}
-      targetPort: {{ .Values.embeddedRedis.port | default 6379 }}
+      port: {{ default 6379 $er.port }}
+      targetPort: {{ default 6379 $er.port }}
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: redis
-  labels: { app: redis }
+  labels:
+    app: redis
 spec:
-  replicas: 1
+  replicas: {{ default 1 $er.replicas }}
   selector:
-    matchLabels: { app: redis }
+    matchLabels:
+      app: redis
   template:
     metadata:
-      labels: { app: redis }
+      labels:
+        app: redis
     spec:
       containers:
         - name: redis
-          image: {{ .Values.embeddedRedis.image | quote }}
+          image: {{ default "redis:7-alpine" $er.image | quote }}
+          imagePullPolicy: {{ default "IfNotPresent" $er.imagePullPolicy | quote }}
           ports:
-            - containerPort: {{ .Values.embeddedRedis.port | default 6379 }}
+            - containerPort: {{ default 6379 $er.port }}
           args: ["--save", "''", "--appendonly", "no"]
           resources:
-{{ toYaml .Values.embeddedRedis.resources | indent 12 }}
+            {{- if $er.resources }}
+            {{- toYaml $er.resources | nindent 12 }}
+            {{- else }}
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+            {{- end }}
 {{- end }}
