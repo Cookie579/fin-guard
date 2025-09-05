@@ -1,4 +1,3 @@
-# k8s/helm/broker/values.yaml
 image:
   repository: ghcr.io/cookie579/rate-broker
   tag: latest

@@ -2,11 +2,11 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: rate-broker
-  namespace: {{ .Values.namespace | default "default" }}
+  namespace: {{ default "default" .Values.namespace }}
   labels:
     app: rate-broker
 spec:
-  replicas: {{ .Values.replicas | default 2 }}
+  replicas: {{ default 2 .Values.replicas }}
   revisionHistoryLimit: 3
   selector:
     matchLabels:
@@ -24,71 +24,54 @@ spec:
       imagePullSecrets:
         - name: {{ .Values.image.pullSecret }}
       {{- end }}
-
-      {{- /* Resolve broker image whether .Values.image is a string or a map */ -}}
-      {{- $img := .Values.image -}}
-      {{- $imageFull := "" -}}
-      {{- $pull := "IfNotPresent" -}}
-      {{- if kindIs "map" $img -}}
-        {{- $repo := default "ghcr.io/cookie579/rate-broker" $img.repository -}}
-        {{- $tag  := default "latest" $img.tag -}}
-        {{- $imageFull = printf "%s:%s" $repo $tag -}}
-        {{- $pull = default "IfNotPresent" $img.pullPolicy -}}
-      {{- else -}}
-        {{- $imageFull = default "ghcr.io/cookie579/rate-broker:latest" $img -}}
-      {{- end }}
-
-      {{- $sc := .Values.sidecarRedis | default dict -}}
-
       containers:
         - name: broker
-          image: {{ $imageFull | quote }}
-          imagePullPolicy: {{ $pull | quote }}
+          image: "{{ required "image.repository is required" .Values.image.repository }}:{{ default "latest" .Values.image.tag }}"
+          imagePullPolicy: {{ default "IfNotPresent" .Values.image.pullPolicy }}
           ports:
             - name: http
               containerPort: 8080
-
-          # Broker reads config from /app/config.json (mounted from Secret)
           volumeMounts:
             - name: preprocess-config
               mountPath: /app
               readOnly: true
-
           readinessProbe:
-            httpGet: { path: /healthz, port: 8080 }
+            httpGet:
+              path: /healthz
+              port: 8080
             initialDelaySeconds: 3
             periodSeconds: 5
             timeoutSeconds: 2
             failureThreshold: 6
           livenessProbe:
-            httpGet: { path: /healthz, port: 8080 }
+            httpGet:
+              path: /healthz
+              port: 8080
             initialDelaySeconds: 10
             periodSeconds: 10
             timeoutSeconds: 2
             failureThreshold: 3
-
           {{- with .Values.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
 
         - name: redis
-          image: {{ default "redis:7-alpine" $sc.image | quote }}
-          imagePullPolicy: {{ default "IfNotPresent" $sc.imagePullPolicy | quote }}
+          image: {{ default "redis:7-alpine" (and .Values.sidecarRedis .Values.sidecarRedis.image) | default "redis:7-alpine" | quote }}
           ports:
-            - containerPort: {{ default 6379 $sc.port }}
+            - containerPort: {{ default 6379 (and .Values.sidecarRedis .Values.sidecarRedis.port) | default 6379 }}
           args: ["--save", "''", "--appendonly", "no"]
-          {{- with $sc.resources }}
+          {{- if and .Values.sidecarRedis .Values.sidecarRedis.resources }}
           resources:
-            {{- toYaml . | nindent 12 }}
+            {{- toYaml .Values.sidecarRedis.resources | nindent 12 }}
           {{- end }}
 
       volumes:
         - name: preprocess-config
           secret:
-            secretName: {{ .Values.preprocessConfig.secretName | default "preprocess-config" }}
+            secretName: {{ default "preprocess-config" (and .Values.preprocessConfig .Values.preprocessConfig.secretName) | default "preprocess-config" }}
             items:
-              - key: {{ .Values.preprocessConfig.secretKey | default "config.json" }}
+              - key: {{ default "config.json" (and .Values.preprocessConfig .Values.preprocessConfig.secretKey) | default "config.json" }}
                 path: config.json
 
       {{- with .Values.nodeSelector }}
