@@ -2,11 +2,11 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: rate-broker
-  namespace: {{ .Values.namespace | default "default" }}
+  namespace: {{ default "default" .Values.namespace }}
   labels:
     app: rate-broker
 spec:
-  replicas: {{ .Values.replicas | default 2 }}
+  replicas: {{ default 2 .Values.replicas }}
   revisionHistoryLimit: 3
   selector:
     matchLabels:
@@ -20,15 +20,15 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
     spec:
-      {{- if .Values.image.pullSecret }}
+      {{- with .Values.image.pullSecret }}
       imagePullSecrets:
-        - name: {{ .Values.image.pullSecret }}
+        - name: {{ . }}
       {{- end }}
 
       containers:
         - name: broker
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy | default "IfNotPresent" }}
+          image: "{{ dig "image" "repository" .Values "ghcr.io/cookie579/rate-broker" }}:{{ dig "image" "tag" .Values "latest" }}"
+          imagePullPolicy: {{ dig "image" "pullPolicy" .Values "Always" }}
           ports:
             - name: http
               containerPort: 8080
@@ -52,17 +52,17 @@ spec:
             timeoutSeconds: 2
             failureThreshold: 3
 
-          {{- with .Values.resources }}
+          {{- with (dig "resources" .Values nil) }}
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
 
         - name: redis
-          image: {{ .Values.sidecarRedis.image | default "redis:7-alpine" | quote }}
+          image: {{ dig "sidecarRedis" "image" .Values "redis:7-alpine" | quote }}
           ports:
-            - containerPort: {{ .Values.sidecarRedis.port | default 6379 }}
+            - containerPort: {{ dig "sidecarRedis" "port" .Values 6379 }}
           args: ["--save", "''", "--appendonly", "no"]
-          {{- with .Values.sidecarRedis.resources }}
+          {{- with (dig "sidecarRedis" "resources" .Values nil) }}
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
@@ -70,9 +70,9 @@ spec:
       volumes:
         - name: preprocess-config
           secret:
-            secretName: {{ .Values.preprocessConfig.secretName | default "preprocess-config" }}
+            secretName: {{ dig "preprocessConfig" "secretName" .Values "preprocess-config" }}
             items:
-              - key: {{ .Values.preprocessConfig.secretKey | default "config.json" }}
+              - key: {{ dig "preprocessConfig" "secretKey" .Values "config.json" }}
                 path: config.json
 
       {{- with .Values.nodeSelector }}
