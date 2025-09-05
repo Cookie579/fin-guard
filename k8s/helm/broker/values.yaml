@@ -2,7 +2,7 @@
 image:
   repository: ghcr.io/cookie579/rate-broker
   tag: latest
-  pullPolicy: IfNotPresent
+  pullPolicy: Always
 
 namespace: default
 replicas: 2

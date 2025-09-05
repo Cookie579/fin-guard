@@ -2,11 +2,11 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: rate-broker
-  namespace: {{ default "default" .Values.namespace }}
+  namespace: {{ .Values.namespace | default "default" }}
   labels:
     app: rate-broker
 spec:
-  replicas: {{ default 2 .Values.replicas }}
+  replicas: {{ .Values.replicas | default 2 }}
   revisionHistoryLimit: 3
   selector:
     matchLabels:
@@ -20,15 +20,30 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
     spec:
-      {{- with .Values.image.pullSecret }}
+      {{- if .Values.image.pullSecret }}
       imagePullSecrets:
-        - name: {{ . }}
+        - name: {{ .Values.image.pullSecret }}
       {{- end }}
+
+      {{- /* Resolve broker image whether .Values.image is a string or a map */ -}}
+      {{- $img := .Values.image -}}
+      {{- $imageFull := "" -}}
+      {{- $pull := "IfNotPresent" -}}
+      {{- if kindIs "map" $img -}}
+        {{- $repo := default "ghcr.io/cookie579/rate-broker" $img.repository -}}
+        {{- $tag  := default "latest" $img.tag -}}
+        {{- $imageFull = printf "%s:%s" $repo $tag -}}
+        {{- $pull = default "IfNotPresent" $img.pullPolicy -}}
+      {{- else -}}
+        {{- $imageFull = default "ghcr.io/cookie579/rate-broker:latest" $img -}}
+      {{- end }}
+
+      {{- $sc := .Values.sidecarRedis | default dict -}}
 
       containers:
         - name: broker
-          image: "{{ dig "image" "repository" .Values "ghcr.io/cookie579/rate-broker" }}:{{ dig "image" "tag" .Values "latest" }}"
-          imagePullPolicy: {{ dig "image" "pullPolicy" .Values "Always" }}
+          image: {{ $imageFull | quote }}
+          imagePullPolicy: {{ $pull | quote }}
           ports:
             - name: http
               containerPort: 8080
@@ -52,17 +67,18 @@ spec:
             timeoutSeconds: 2
             failureThreshold: 3
 
-          {{- with (dig "resources" .Values nil) }}
+          {{- with .Values.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
 
         - name: redis
-          image: {{ dig "sidecarRedis" "image" .Values "redis:7-alpine" | quote }}
+          image: {{ default "redis:7-alpine" $sc.image | quote }}
+          imagePullPolicy: {{ default "IfNotPresent" $sc.imagePullPolicy | quote }}
           ports:
-            - containerPort: {{ dig "sidecarRedis" "port" .Values 6379 }}
+            - containerPort: {{ default 6379 $sc.port }}
           args: ["--save", "''", "--appendonly", "no"]
-          {{- with (dig "sidecarRedis" "resources" .Values nil) }}
+          {{- with $sc.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
@@ -70,9 +86,9 @@ spec:
       volumes:
         - name: preprocess-config
           secret:
-            secretName: {{ dig "preprocessConfig" "secretName" .Values "preprocess-config" }}
+            secretName: {{ .Values.preprocessConfig.secretName | default "preprocess-config" }}
             items:
-              - key: {{ dig "preprocessConfig" "secretKey" .Values "config.json" }}
+              - key: {{ .Values.preprocessConfig.secretKey | default "config.json" }}
                 path: config.json
 
       {{- with .Values.nodeSelector }}
