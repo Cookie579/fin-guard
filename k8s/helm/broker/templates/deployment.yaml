@@ -3,43 +3,92 @@ kind: Deployment
 metadata:
   name: rate-broker
   namespace: {{ .Values.namespace | default "default" }}
-  labels: { app: rate-broker }
+  labels:
+    app: rate-broker
 spec:
   replicas: {{ .Values.replicas | default 2 }}
+  revisionHistoryLimit: 3
   selector:
-    matchLabels: { app: rate-broker }
+    matchLabels:
+      app: rate-broker
   template:
     metadata:
-      labels: { app: rate-broker }
+      labels:
+        app: rate-broker
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
     spec:
       {{- if .Values.image.pullSecret }}
       imagePullSecrets:
         - name: {{ .Values.image.pullSecret }}
       {{- end }}
+
+      {{- if .Values.embeddedRedis.enabled }}
+      # Optional: wait until embedded Redis answers PING
+      initContainers:
+        - name: wait-redis
+          image: redis:7-alpine
+          command: ["sh", "-c"]
+          args:
+            - >
+              echo "waiting for redis at {{ .Values.embeddedRedis.serviceName | default "redis" }}:{{ .Values.embeddedRedis.port | default 6379 }}";
+              until redis-cli -h {{ .Values.embeddedRedis.serviceName | default "redis" }}
+                               -p {{ .Values.embeddedRedis.port | default 6379 }} ping | grep -q PONG;
+              do sleep 1; done;
+              echo "redis is up";
+      {{- end }}
+
       containers:
-      - name: broker
-        image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-        imagePullPolicy: {{ .Values.image.pullPolicy | default "Always" }}
-        ports:
-        - name: http
-          containerPort: 8080
-        # No env at all — broker reads /app/config.json
-        volumeMounts:
-        - name: preprocess-config
-          mountPath: /app
-          readOnly: true
-        readinessProbe:
-          httpGet: { path: /healthz, port: 8080 }
-          initialDelaySeconds: 3
-          periodSeconds: 5
-        livenessProbe:
-          httpGet: { path: /healthz, port: 8080 }
-          initialDelaySeconds: 10
-          periodSeconds: 10
+        - name: broker
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy | default "IfNotPresent" }}
+          ports:
+            - name: http
+              containerPort: 8080
+
+          # No env at all — broker reads /app/config.json
+          volumeMounts:
+            - name: preprocess-config
+              mountPath: /app
+              readOnly: true
+
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 6
+          livenessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+
       volumes:
-      - name: preprocess-config
-        secret:
-          secretName: {{ .Values.preprocessConfig.secretName | default "preprocess-config" }}
-          items:
-          - key: {{ .Values.preprocessConfig.secretKey | default "config.json" }}
-            path: config.json
+        - name: preprocess-config
+          secret:
+            secretName: {{ .Values.preprocessConfig.secretName | default "preprocess-config" }}
+            items:
+              - key: {{ .Values.preprocessConfig.secretKey | default "config.json" }}
+                path: config.json
+
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
