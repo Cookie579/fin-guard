@@ -27,7 +27,7 @@ type Config struct {
 	GoogleCX       string       `json:"google_cx"`
 	KinesisStream  string       `json:"kinesis_stream"`
 	AWSRegion      string       `json:"aws_region"`
-	Stocktwitkeys  []string     `json:"stocktwits_keys"`
+	Stocktwitkeys  []string     `json:"stocktwit_keys"`
 	YouTubeAPIKeys []string     `json:"youtube_api_keys"`
 	Broker         BrokerConfig `json:"broker"`
 }
@@ -68,7 +68,7 @@ func Loadstocktwitkeys() ([]string, error) {
 		return nil, err
 	}
 	if len(cfg.Stocktwitkeys) == 0 {
-		return nil, errors.New("config.json: stocktwits_keys is empty or missing")
+		return nil, errors.New("config.json: stocktwit_keys is empty or missing")
 	}
 	return dedupeTrim(cfg.Stocktwitkeys), nil
 }

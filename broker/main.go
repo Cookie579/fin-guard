@@ -100,7 +100,7 @@ func newServer() *Server {
 	// Stocktwits rate/host/keys from config.json
 	host := GetStocktwitsHost(cfg)                // default "stocktwits.p.rapidapi.com"
 	rate, burst, maxInf := GetStocktwitsRate(cfg) // defaults 0.2777778, 10, 1
-	keys, err := Loadstocktwitkeys()              // required: config.json.stocktwits_keys
+	keys, err := Loadstocktwitkeys()              // required: config.json.stocktwit_keys
 	if err != nil || len(keys) == 0 {
 		log.Fatalf("rapidapi keys: %v", err)
 	}

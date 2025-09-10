@@ -21,7 +21,7 @@ spec:
           maxInflight: "1"
           keysFromSecret:
             name: preprocess-config
-            key: stocktwits_keys
+            key: stocktwit_keys
   destination:
     server: https://kubernetes.default.svc
     namespace: default

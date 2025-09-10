@@ -14,7 +14,7 @@ type Config struct {
 	GoogleCX      string `json:"google_cx"`
 	TwitterBearer string `json:"twitter_bearer"`
 
-	stocktwitkeys []string `json:"stocktwits_keys"`
+	stocktwitkeys []string `json:"stocktwit_keys"`
 
 	// 1: agasthya.mc@gmail.com | 2: cookieh777@gmail.com | 3: torylanezzz333@gmail.com | 4: esg.finguard@gmail.com | 5: warrenharold119@gmail.com | 6: aspfinances727@gmail.com | 7: jeffhuckle797@gmail.com | 8: temp burner | 9: jonesclifford119@gmail.com | 10: ajaygrifter@gmail.com
 
