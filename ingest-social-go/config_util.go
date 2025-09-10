@@ -27,7 +27,7 @@ type Config struct {
 	GoogleCX       string       `json:"google_cx"`
 	KinesisStream  string       `json:"kinesis_stream"`
 	AWSRegion      string       `json:"aws_region"`
-	RapidAPIKeys   []string     `json:"rapidapi_keys"`
+	RapidAPIKeys   []string     `json:"stocktwits_keys"`
 	YouTubeAPIKeys []string     `json:"youtube_api_keys"`
 	Broker         BrokerConfig `json:"broker"`
 }
@@ -68,7 +68,7 @@ func LoadRapidAPIKeys() ([]string, error) {
 		return nil, err
 	}
 	if len(cfg.RapidAPIKeys) == 0 {
-		return nil, errors.New("config.json: rapidapi_keys is empty or missing")
+		return nil, errors.New("config.json: stocktwits_keys is empty or missing")
 	}
 	return dedupeTrim(cfg.RapidAPIKeys), nil
 }
