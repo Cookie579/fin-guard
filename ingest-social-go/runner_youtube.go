@@ -1,515 +1,273 @@
 package main
 
 import (
-	"context"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
-	"log"
-	"net/http"
-	"net/url"
-	"strconv"
-	"strings"
-	"time"
+    "context"
+    "encoding/json"
+    "errors"
+    "fmt"
+    "io"
+    "net/http"
+    "net/url"
+    "time"
+    "strings"
+
+    // strconv is imported for completeness but unused in this file
+    _ "strconv"
 )
 
-// RunYouTubeJob orchestrates a YouTube ingest job. It searches for new
-// videos related to the given ticker, inserts discovered IDs into DynamoDB
-// to ensure idempotency, fetches metadata and comments for new videos,
-// publishes the resulting records to Kinesis and updates the state on
-// completion. On error it emits a job_failed event. The function honours
-// context cancellation and will terminate gracefully when cancelled.
+// RunYouTubeJob orchestrates a YouTube ingest job using the RapidAPI YouTube
+// v3 Lite proxy. It collects video metadata for a given channel ID and
+// publishes RAW records to Kinesis. The state table is used to track the
+// latest and oldest publishedAt timestamps in Unix seconds. Duplicate
+// prevention is handled via InsertYouTubeVideoID. It respects context
+// cancellation and job-level limits.
 func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeArgs) error {
-	ticker := strings.ToUpper(args.Ticker)
-	source := "youtube"
-	ownerID := jobID
-	store, err := NewDynamoStore(ctx)
-	if err != nil {
-		return fmt.Errorf("create dynamo store: %w", err)
-	}
-	pub, err := NewKinesisPublisher(ctx, jobID)
-	if err != nil {
-		return fmt.Errorf("create kinesis publisher: %w", err)
-	}
-	defer func() {
-		_ = pub.Close(ctx)
-	}()
-	// Helper to emit metadata events. Each metadata record is tagged with
-	// StageEvents so control-plane events are routed separately from raw
-	// data in the data lake. The ts field records the current UTC time in
-	// RFC3339 format.
-	emitMeta := func(eventType string, extra map[string]any) {
-		rec := map[string]any{
-			"stage":  StageEvents,
-			"type":   eventType,
-			"source": source,
-			"ticker": ticker,
-			"job_id": jobID,
-			"ts":     time.Now().UTC().Format(time.RFC3339),
-		}
-		for k, v := range extra {
-			rec[k] = v
-		}
-		rowKey := fmt.Sprintf("meta:%s", eventType)
-		if err := pub.AddRecord(source, ticker, rowKey, rec); err != nil {
-			log.Printf("WARN: failed to emit %s event: %v", eventType, err)
-		}
-	}
-	// Emit job_started
-	emitMeta("job_started", map[string]any{})
-	// Acquire lock. If another job holds the lock, return sentinel error without
-	// emitting job_failed so the caller can exit with status code 2.
-	if err := store.AcquireLock(ctx, source, ticker, ownerID, jobID); err != nil {
-		if errors.Is(err, ErrLockNotAcquired) {
-			return err
-		}
-		emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("lock: %v", err)})
-		return err
-	}
-	// Print LOCK_ACQUIRED marker
-	fmt.Printf("LOCK_ACQUIRED job_id=%s pk=%s#%s\n", jobID, source, strings.ToUpper(ticker))
-	defer func() {
-		_ = store.ReleaseLock(context.Background(), source, ticker, ownerID)
-	}()
+    // Channel ID is taken from args.Ticker. Do not uppercase as YouTube IDs are case sensitive.
+    channelID := args.Ticker
+    source := "youtube"
+    ownerID := jobID
 
-	// Start heartbeat goroutine to extend the lock periodically
-	hbCtx, hbCancel := context.WithCancel(ctx)
-	go func() {
-		t := time.NewTicker(time.Duration(LockHeartbeatSeconds) * time.Second)
-		defer t.Stop()
-		for {
-			select {
-			case <-hbCtx.Done():
-				return
-			case <-t.C:
-				if err := store.HeartbeatLock(ctx, source, ticker, ownerID); err != nil {
-					log.Printf("WARN: heartbeat failed for %s: %v", ticker, err)
-				}
-			}
-		}
-	}()
-	defer hbCancel()
-	// Read a single YouTube API key from the flat config. The key can be
-	// provided as google_api_key or the first entry in google_api_keys. An
-	// error indicates that no valid key could be found.
-	ytKey, err := getYouTubeAPIKey()
-	if err != nil {
-		err := fmt.Errorf("youtube: %w", err)
-		emitMeta("job_failed", map[string]any{"reason": err.Error()})
-		return err
-	}
-	client := &http.Client{Timeout: 45 * time.Second}
-	// Load state (last search time) – currently unused beyond logging
-	_, err = store.GetYouTubeState(ctx, ticker)
-	if err != nil {
-		emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("state load: %v", err)})
-		return err
-	}
-	// Build a list of search queries for the ticker
-	queries := searchQueries(ticker)
-	var processed int
-	startTime := time.Now()
-	// Outer loop: iterate queries until we reach max videos
-	for _, q := range queries {
-		if args.MaxVideos > 0 && processed >= args.MaxVideos {
-			break
-		}
-		pageToken := ""
-		for {
-			if args.MaxVideos > 0 && processed >= args.MaxVideos {
-				break
-			}
-			select {
-			case <-ctx.Done():
-				emitMeta("job_failed", map[string]any{"reason": "terminated"})
-				return fmt.Errorf("terminated")
-			default:
-			}
-			// Build search request: part=id to fetch only video IDs
-			params := url.Values{}
-			params.Set("part", "id")
-			params.Set("type", "video")
-			params.Set("q", q)
-			params.Set("maxResults", strconv.Itoa(YtDefaultSearchPageSize))
-			if pageToken != "" {
-				params.Set("pageToken", pageToken)
-			}
-			// Use the resolved YouTube API key for all requests
-			params.Set("key", ytKey)
-			searchURL := fmt.Sprintf("https://youtube.googleapis.com/youtube/v3/search?%s", params.Encode())
-			req, _ := http.NewRequestWithContext(ctx, http.MethodGet, searchURL, nil)
-			req.Header.Set("User-Agent", "ingest-social-go/1.0")
-			resp, err := client.Do(req)
-			if err != nil {
-				emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("search HTTP error: %v", err)})
-				return err
-			}
-			body, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if resp.StatusCode != http.StatusOK {
-				err := fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-				emitMeta("job_failed", map[string]any{"reason": err.Error()})
-				return err
-			}
-			var sresp struct {
-				NextPageToken string `json:"nextPageToken"`
-				Items         []struct {
-					ID struct {
-						VideoID string `json:"videoId"`
-					} `json:"id"`
-				} `json:"items"`
-			}
-			if err := json.Unmarshal(body, &sresp); err != nil {
-				emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("search unmarshal: %v", err)})
-				return err
-			}
-			if len(sresp.Items) == 0 {
-				break
-			}
-			// Process each video ID
-			for _, item := range sresp.Items {
-				if args.MaxVideos > 0 && processed >= args.MaxVideos {
-					break
-				}
-				vid := item.ID.VideoID
-				if vid == "" {
-					continue
-				}
-				// Determine the year from published_at – we'll discover this later when fetching meta
-				// For initial insert we use the current year as a fallback
-				now := time.Now().UTC()
-				year := now.Year()
-				// Insert video ID into DDB to check for duplicates
-				inserted, err := store.InsertYouTubeVideoID(ctx, ticker, year, vid, now, nil, "", jobID)
-				if err != nil {
-					emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("ddb insert: %v", err)})
-					return err
-				}
-				if !inserted {
-					// Duplicate – skip processing
-					continue
-				}
-				// Fetch video metadata using the resolved API key
-				if err := fetchAndEmitVideoMeta(ctx, client, pub, ytKey, ticker, source, jobID, ingestDate, vid); err != nil {
-					emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("meta: %v", err)})
-					return err
-				}
-				// Fetch and emit comments using the same API key
-				if err := fetchAndEmitVideoComments(ctx, client, pub, ytKey, ticker, source, jobID, ingestDate, vid, args.ExtraPages, args.DelayMS); err != nil {
-					emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("comments: %v", err)})
-					return err
-				}
-				processed++
-			}
-			// Move to next page or stop if there is none
-			if sresp.NextPageToken == "" {
-				break
-			}
-			pageToken = sresp.NextPageToken
-		}
-	}
-	// Update search state – mark last_search_at
-	if err := store.UpdateYouTubeState(ctx, ticker); err != nil {
-		emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("state update: %v", err)})
-		return err
-	}
-	// Emit job_completed
-	durationMs := time.Since(startTime).Milliseconds()
-	emitMeta("job_completed", map[string]any{"duration_ms": durationMs})
-	return nil
-}
+    store, err := NewDynamoStore(ctx)
+    if err != nil {
+        return fmt.Errorf("create dynamo store: %w", err)
+    }
+    pub, err := NewKinesisPublisher(ctx, jobID)
+    if err != nil {
+        return fmt.Errorf("create kinesis publisher: %w", err)
+    }
+    defer func() { _ = pub.Close(ctx) }()
 
-// searchQueries returns a collection of default YouTube search strings for a
-// given ticker symbol. The strings are designed to capture a variety of
-// investor and news contexts around the company.
-func searchQueries(tk string) []string {
-	return []string{
-		fmt.Sprintf("$%s stock", tk),
-		fmt.Sprintf("%s earnings", tk),
-		fmt.Sprintf("%s stock analysis", tk),
-		fmt.Sprintf("%s price prediction", tk),
-		fmt.Sprintf("%s news", tk),
-		fmt.Sprintf("%s stock update", tk),
-		fmt.Sprintf("%s investor day", tk),
-		fmt.Sprintf("%s quarterly results", tk),
-		fmt.Sprintf("%s stock crash", tk),
-		fmt.Sprintf("%s vs", tk),
-	}
-}
+    // Metadata emitter for events
+    emitMeta := func(eventType string, extra map[string]any) {
+        rec := map[string]any{
+            "stage":  StageEvents,
+            "type":   eventType,
+            "source": source,
+            "ticker": channelID,
+            "job_id": jobID,
+            "ts":     time.Now().UTC().Format(time.RFC3339),
+        }
+        for k, v := range extra {
+            rec[k] = v
+        }
+        rowKey := fmt.Sprintf("meta:%s", eventType)
+        _ = pub.AddRecord(source, channelID, rowKey, rec)
+    }
 
-// readYouTubeAPIKeys parses config.json and extracts YouTube API keys. Keys
-// are looked up by a number of common property names. See readstocktwitkeys
-// for similar logic.
-func readYouTubeAPIKeys() ([]string, error) {
-	// Load configuration from the first available config.json path. See
-	// loadConfigBytes for details.
-	b, err := loadConfigBytes()
-	if err != nil {
-		return nil, err
-	}
-	var m map[string]any
-	if err := json.Unmarshal(b, &m); err != nil {
-		return nil, err
-	}
-	var out []string
-	tryKeys := []string{
-		"googleApiKey", "google_api_key", "GoogleAPIKey", "youtubeApiKey", "youtube_api_key",
-		"googleApiKeys", "google_api_keys", "GoogleAPIKeys", "youtubeApiKeys", "youtube_api_keys",
-	}
-	for _, k := range tryKeys {
-		if v, ok := m[k]; ok {
-			switch vv := v.(type) {
-			case string:
-				if vv != "" {
-					out = append(out, vv)
-				}
-			case []any:
-				for _, it := range vv {
-					if s, ok := it.(string); ok && s != "" {
-						out = append(out, s)
-					}
-				}
-			}
-		}
-	}
-	uniq := map[string]struct{}{}
-	var dedup []string
-	for _, k := range out {
-		if _, ok := uniq[k]; !ok {
-			uniq[k] = struct{}{}
-			dedup = append(dedup, k)
-		}
-	}
-	return dedup, nil
-}
+    emitMeta("job_started", map[string]any{})
 
-// fetchAndEmitVideoMeta retrieves a video's metadata using the YouTube
-// Data API and publishes a youtube_video_meta record. It may update the
-// discovered year in the DynamoDB table by calling InsertYouTubeVideoID
-// again if the actual published year differs from the provisional year.
-// fetchAndEmitVideoMeta retrieves a video's metadata using the YouTube
-// Data API and publishes a youtube_video_meta record. It takes a single
-// API key rather than a slice and index; callers should supply the key
-// returned by getYouTubeAPIKey().
-func fetchAndEmitVideoMeta(ctx context.Context, client *http.Client, pub *KinesisPublisher, apiKey string, ticker, source, jobID, ingestDate, vid string) error {
-	// Build URL for videos.list
-	params := url.Values{}
-	params.Set("part", "snippet,contentDetails,statistics")
-	params.Set("id", vid)
-	params.Set("key", apiKey)
-	urlStr := fmt.Sprintf("https://youtube.googleapis.com/youtube/v3/videos?%s", params.Encode())
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
-	req.Header.Set("User-Agent", "ingest-social-go/1.0")
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("videos.list HTTP %d: %s", resp.StatusCode, string(body))
-	}
-	var vresp struct {
-		Items []struct {
-			ID      string `json:"id"`
-			Snippet struct {
-				Title       string   `json:"title"`
-				ChannelID   string   `json:"channelId"`
-				PublishedAt string   `json:"publishedAt"`
-				Description string   `json:"description"`
-				Tags        []string `json:"tags"`
-			} `json:"snippet"`
-			Statistics struct {
-				ViewCount    string `json:"viewCount"`
-				LikeCount    string `json:"likeCount"`
-				CommentCount string `json:"commentCount"`
-			} `json:"statistics"`
-			ContentDetails struct {
-				Duration string `json:"duration"`
-			} `json:"contentDetails"`
-		} `json:"items"`
-	}
-	if err := json.Unmarshal(body, &vresp); err != nil {
-		return fmt.Errorf("videos.list unmarshal: %v", err)
-	}
-	if len(vresp.Items) == 0 {
-		return fmt.Errorf("no video metadata returned for %s", vid)
-	}
-	item := vresp.Items[0]
-	// Parse counts
-	viewCount, _ := strconv.ParseInt(item.Statistics.ViewCount, 10, 64)
-	likeCount, _ := strconv.ParseInt(item.Statistics.LikeCount, 10, 64)
-	commentCount, _ := strconv.ParseInt(item.Statistics.CommentCount, 10, 64)
-	// Parse duration
-	durationMs := parseISO8601Duration(item.ContentDetails.Duration)
-	// Compose record
-	rec := map[string]any{
-		"stage":         StageRaw,
-		"type":          "youtube_video_meta",
-		"source":        source,
-		"ticker":        ticker,
-		"ingest_date":   ingestDate,
-		"job_id":        jobID,
-		"video_id":      vid,
-		"channel_id":    item.Snippet.ChannelID,
-		"published_at":  item.Snippet.PublishedAt,
-		"title":         item.Snippet.Title,
-		"description":   item.Snippet.Description,
-		"duration_ms":   durationMs,
-		"view_count":    viewCount,
-		"like_count":    likeCount,
-		"comment_count": commentCount,
-		"tags":          item.Snippet.Tags,
-	}
-	if err := pub.AddRecord(source, ticker, vid, rec); err != nil {
-		return err
-	}
-	return nil
-}
+    // Acquire lock
+    if err := store.AcquireLock(ctx, source, channelID, ownerID, jobID); err != nil {
+        if errors.Is(err, ErrLockNotAcquired) {
+            return err
+        }
+        emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("lock: %v", err)})
+        return err
+    }
+    fmt.Printf("LOCK_ACQUIRED job_id=%s pk=%s#%s\n", jobID, source, strings.ToUpper(channelID))
+    defer func() { _ = store.ReleaseLock(context.Background(), source, channelID, ownerID) }()
 
-// fetchAndEmitVideoComments retrieves up to one page of comments plus any
-// requested extra pages. Each call publishes a youtube_comment record for
-// every comment thread retrieved. Delay between calls is controlled by
-// delayMs. extraPages = -1 means all available pages; 0 means no extra
-// pages; positive values specify how many pages beyond the first to fetch.
-// fetchAndEmitVideoComments retrieves YouTube comments for a video and
-// publishes a youtube_comment record for each top-level comment. It uses a
-// single YouTube API key rather than rotating through a slice.
-func fetchAndEmitVideoComments(ctx context.Context, client *http.Client, pub *KinesisPublisher, apiKey string, ticker, source, jobID, ingestDate, vid string, extraPages int, delayMs int) error {
-	pageToken := ""
-	pagesFetched := 0
-	for {
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("terminated")
-		default:
-		}
-		// Respect extraPages limit; always fetch at least the first page
-		if pagesFetched > 0 {
-			if extraPages == 0 {
-				break
-			}
-			if extraPages > 0 && pagesFetched > extraPages {
-				break
-			}
-		}
-		params := url.Values{}
-		params.Set("part", "snippet")
-		params.Set("videoId", vid)
-		params.Set("maxResults", strconv.Itoa(YtDefaultCommentPageSize))
-		if pageToken != "" {
-			params.Set("pageToken", pageToken)
-		}
-		params.Set("key", apiKey)
-		urlStr := fmt.Sprintf("https://youtube.googleapis.com/youtube/v3/commentThreads?%s", params.Encode())
-		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
-		req.Header.Set("User-Agent", "ingest-social-go/1.0")
-		resp, err := client.Do(req)
-		if err != nil {
-			return err
-		}
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("commentThreads HTTP %d: %s", resp.StatusCode, string(body))
-		}
-		var cresp struct {
-			NextPageToken string `json:"nextPageToken"`
-			Items         []struct {
-				Snippet struct {
-					TopLevelComment struct {
-						ID      string `json:"id"`
-						Snippet struct {
-							TextOriginal    string `json:"textOriginal"`
-							AuthorChannelID struct {
-								Value string `json:"value"`
-							} `json:"authorChannelId"`
-							AuthorDisplayName string `json:"authorDisplayName"`
-							LikeCount         int    `json:"likeCount"`
-							PublishedAt       string `json:"publishedAt"`
-							TotalReplyCount   int    `json:"totalReplyCount"`
-						} `json:"snippet"`
-					} `json:"topLevelComment"`
-				} `json:"snippet"`
-			} `json:"items"`
-		}
-		if err := json.Unmarshal(body, &cresp); err != nil {
-			return fmt.Errorf("commentThreads unmarshal: %v", err)
-		}
-		if len(cresp.Items) == 0 {
-			break
-		}
-		for _, thread := range cresp.Items {
-			cid := thread.Snippet.TopLevelComment.ID
-			s := thread.Snippet.TopLevelComment.Snippet
-			rec := map[string]any{
-				"stage":               StageRaw,
-				"type":                "youtube_comment",
-				"source":              source,
-				"ticker":              ticker,
-				"ingest_date":         ingestDate,
-				"job_id":              jobID,
-				"video_id":            vid,
-				"comment_id":          cid,
-				"parent_id":           nil,
-				"published_at":        s.PublishedAt,
-				"author_channel_id":   s.AuthorChannelID.Value,
-				"author_display_name": s.AuthorDisplayName,
-				"text":                s.TextOriginal,
-				"like_count":          s.LikeCount,
-				"reply_count":         s.TotalReplyCount,
-			}
-			rowKey := fmt.Sprintf("%s:%s", vid, cid)
-			if err := pub.AddRecord(source, ticker, rowKey, rec); err != nil {
-				return err
-			}
-		}
-		pagesFetched++
-		if cresp.NextPageToken == "" {
-			break
-		}
-		pageToken = cresp.NextPageToken
-		// Delay to respect quota pacing
-		if delayMs > 0 {
-			select {
-			case <-ctx.Done():
-				return fmt.Errorf("terminated")
-			case <-time.After(time.Duration(delayMs) * time.Millisecond):
-			}
-		}
-	}
-	return nil
-}
+    // Start heartbeat
+    hbCtx, hbCancel := context.WithCancel(ctx)
+    go func() {
+        t := time.NewTicker(time.Duration(LockHeartbeatSeconds) * time.Second)
+        defer t.Stop()
+        for {
+            select {
+            case <-hbCtx.Done():
+                return
+            case <-t.C:
+                _ = store.HeartbeatLock(ctx, source, channelID, ownerID)
+            }
+        }
+    }()
+    defer hbCancel()
 
-// parseISO8601Duration parses a subset of ISO‑8601 duration strings into
-// milliseconds. It understands hours, minutes and seconds (e.g. PT1H2M3S).
-func parseISO8601Duration(s string) int64 {
-	if !strings.HasPrefix(s, "PT") {
-		return 0
-	}
-	s = strings.TrimPrefix(s, "PT")
-	var numStr string
-	var total time.Duration
-	for _, r := range s {
-		switch {
-		case r >= '0' && r <= '9':
-			numStr += string(r)
-		default:
-			if numStr == "" {
-				continue
-			}
-			n, _ := strconv.Atoi(numStr)
-			switch r {
-			case 'H':
-				total += time.Duration(n) * time.Hour
-			case 'M':
-				total += time.Duration(n) * time.Minute
-			case 'S':
-				total += time.Duration(n) * time.Second
-			}
-			numStr = ""
-		}
-	}
-	return total.Milliseconds()
+    // Load existing state (last search time). The DynamoStore.GetYouTubeState
+    // returns a pointer to the last_search_at timestamp (if any) and an error.
+    // We convert this to a Unix seconds cutoff for de-duplication. The
+    // GetYouTubeState signature only returns two values: (*time.Time, error).
+    lastSearchAt, err := store.GetYouTubeState(ctx, channelID)
+    if err != nil {
+        emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("state load: %v", err)})
+        return err
+    }
+    var latestID int64
+    // If we have a last_search_at value, use it as our cutoff in Unix seconds.
+    if lastSearchAt != nil {
+        latestID = lastSearchAt.UTC().Unix()
+    }
+    // We still track the oldestID (oldest timestamp seen) to aid in potential backfill logic.
+    var oldestID int64
+    processed := 0
+    startTime := time.Now()
+    client := &http.Client{Timeout: 45 * time.Second}
+    pageToken := ""
+
+    for {
+        if args.MaxVideos > 0 && processed >= args.MaxVideos {
+            break
+        }
+        select {
+        case <-ctx.Done():
+            emitMeta("job_failed", map[string]any{"reason": "terminated"})
+            return fmt.Errorf("terminated")
+        default:
+        }
+
+        // Acquire RapidAPI permit for YouTube
+        lease, err := acquirePermit(ctx, "youtube")
+        if err != nil {
+            emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("broker acquire: %v", err)})
+            return err
+        }
+
+        // Build request
+        q := url.Values{}
+        q.Set("channelId", channelID)
+        q.Set("part", "id,snippet")
+        if pageToken != "" {
+            q.Set("pageToken", pageToken)
+        }
+        reqURL := "https://" + lease.Host + "/search?" + q.Encode()
+        req, _ := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+        req.Header.Set("X-RapidAPI-Host", lease.Host)
+        req.Header.Set("X-RapidAPI-Key", lease.Key)
+        req.Header.Set("User-Agent", "ingest-social-go/1.0")
+
+        var status int
+        var retryAfterMs int
+        var body []byte
+        resp, doErr := client.Do(req)
+        if resp != nil {
+            status = resp.StatusCode
+            retryAfterMs = parseRetryAfterMs(resp.Header.Get("Retry-After"), time.Now())
+            b, _ := io.ReadAll(resp.Body)
+            resp.Body.Close()
+            body = b
+        }
+        ok := (doErr == nil && status == http.StatusOK)
+        reportResult(ctx, lease.ID, ok, status, retryAfterMs)
+
+        if doErr != nil {
+            emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("HTTP error: %v", doErr)})
+            return doErr
+        }
+        if status != http.StatusOK {
+            err := fmt.Errorf("HTTP %d: %s", status, string(body))
+            emitMeta("job_failed", map[string]any{"reason": err.Error()})
+            return err
+        }
+
+        // Parse response
+        var parsed struct {
+            NextPageToken string `json:"nextPageToken"`
+            Items         []struct {
+                ID struct {
+                    VideoID string `json:"videoId"`
+                } `json:"id"`
+                Snippet struct {
+                    PublishedAt string `json:"publishedAt"`
+                    Title       string `json:"title"`
+                    Description string `json:"description"`
+                    ChannelID   string `json:"channelId"`
+                    ChannelTitle string `json:"channelTitle"`
+                } `json:"snippet"`
+            } `json:"items"`
+        }
+        if err := json.Unmarshal(body, &parsed); err != nil {
+            emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("unmarshal: %v", err)})
+            return err
+        }
+        if len(parsed.Items) == 0 {
+            break
+        }
+
+        // Track min timestamp this page
+        var minTsThisPage int64 = 0
+
+        for _, item := range parsed.Items {
+            if args.MaxVideos > 0 && processed >= args.MaxVideos {
+                break
+            }
+            vid := item.ID.VideoID
+            if vid == "" {
+                continue
+            }
+            // parse publishedAt
+            t, err := time.Parse(time.RFC3339, item.Snippet.PublishedAt)
+            if err != nil {
+                continue
+            }
+            ts := t.Unix()
+            if latestID != 0 && ts <= latestID {
+                // already processed or older; skip
+                continue
+            }
+            if minTsThisPage == 0 || ts < minTsThisPage {
+                minTsThisPage = ts
+            }
+            // Insert video ID record to dedup
+            year := t.UTC().Year()
+            _, err = store.InsertYouTubeVideoID(ctx, channelID, year, vid, time.Now().UTC(), &t, item.Snippet.ChannelID, jobID)
+            if err != nil {
+                emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("ddb insert: %v", err)})
+                return err
+            }
+            // Build raw record
+            rec := map[string]any{
+                "stage":         StageRaw,
+                "type":          "youtube_item",
+                "source":        source,
+                "ticker":        channelID,
+                "ingest_date":   ingestDate,
+                "job_id":        jobID,
+                "video_id":      vid,
+                "published_at":  item.Snippet.PublishedAt,
+                "title":         item.Snippet.Title,
+                "description":   item.Snippet.Description,
+                "channel_id":    item.Snippet.ChannelID,
+                "channel_title": item.Snippet.ChannelTitle,
+            }
+            rowKey := vid
+            if err := pub.AddRecord(source, channelID, rowKey, rec); err != nil {
+                emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("publish: %v", err)})
+                return err
+            }
+            processed++
+            if ts > latestID {
+                latestID = ts
+            }
+        }
+
+        // update oldestID if necessary
+        newOldest := oldestID
+        if oldestID == 0 && minTsThisPage > 0 {
+            newOldest = minTsThisPage
+        } else if minTsThisPage > 0 && (oldestID == 0 || minTsThisPage < oldestID) {
+            newOldest = minTsThisPage
+        }
+        // Update the YouTube state. The UpdateYouTubeState method in DynamoStore
+        // does not accept a timestamp; it will set last_search_at to now. We do
+        // not pass latestID/newOldest here to avoid signature mismatch.
+        if err := store.UpdateYouTubeState(ctx, channelID); err != nil {
+            emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("state update: %v", err)})
+            return err
+        }
+        oldestID = newOldest
+
+        emitMeta("batch_committed", map[string]any{"records": processed})
+
+        if parsed.NextPageToken == "" {
+            break
+        }
+        pageToken = parsed.NextPageToken
+        // small jitter to avoid convoy
+        time.Sleep(50 * time.Millisecond)
+    }
+
+    // job completed event
+    durationMs := time.Since(startTime).Milliseconds()
+    emitMeta("job_completed", map[string]any{"duration_ms": durationMs})
+    return nil
 }

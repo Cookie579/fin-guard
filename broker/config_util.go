@@ -28,7 +28,7 @@ type Config struct {
 	KinesisStream  string       `json:"kinesis_stream"`
 	AWSRegion      string       `json:"aws_region"`
 	Stocktwitkeys  []string     `json:"stocktwit_keys"`
-	YouTubeAPIKeys []string     `json:"youtube_api_keys"`
+	YouTubeAPIKeys []string     `json:"youtube_keys"`
 	Broker         BrokerConfig `json:"broker"`
 }
 
