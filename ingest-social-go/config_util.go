@@ -27,7 +27,7 @@ type Config struct {
 	GoogleCX       string       `json:"google_cx"`
 	KinesisStream  string       `json:"kinesis_stream"`
 	AWSRegion      string       `json:"aws_region"`
-	RapidAPIKeys   []string     `json:"stocktwits_keys"`
+	stocktwitkeys  []string     `json:"stocktwits_keys"`
 	YouTubeAPIKeys []string     `json:"youtube_api_keys"`
 	Broker         BrokerConfig `json:"broker"`
 }
@@ -62,15 +62,15 @@ func LoadConfig() (Config, error) {
 
 // ----- Helpers (with sane defaults so old config.json still works) -----
 
-func LoadRapidAPIKeys() ([]string, error) {
+func Loadstocktwitkeys() ([]string, error) {
 	cfg, err := LoadConfig()
 	if err != nil {
 		return nil, err
 	}
-	if len(cfg.RapidAPIKeys) == 0 {
+	if len(cfg.stocktwitkeys) == 0 {
 		return nil, errors.New("config.json: stocktwits_keys is empty or missing")
 	}
-	return dedupeTrim(cfg.RapidAPIKeys), nil
+	return dedupeTrim(cfg.stocktwitkeys), nil
 }
 
 func GetRedisAddr(cfg Config) string {

@@ -25,7 +25,7 @@ type FlatConfig struct {
 	KinesisStream   string   `json:"kinesis_stream"`
 	ReferenceStream string   `json:"reference_stream"`
 	AWSRegion       string   `json:"aws_region"`
-	RapidAPIKeys    []string `json:"stocktwits_keys"`
+	stocktwitkeys   []string `json:"stocktwits_keys"`
 	RapidAPIHost    string   `json:"rapidapi_host"`
 }
 
@@ -69,11 +69,11 @@ func getRapidAPIHostAndKey() (host, key string, err error) {
 	if host == "" {
 		host = DefaultRapidAPIHost
 	}
-	if len(cfg.RapidAPIKeys) == 0 {
+	if len(cfg.stocktwitkeys) == 0 {
 		return "", "", errors.New("no RapidAPI keys found in config.json (stocktwits_keys)")
 	}
-	idx := int(time.Now().Unix()) % len(cfg.RapidAPIKeys)
-	key = cfg.RapidAPIKeys[idx]
+	idx := int(time.Now().Unix()) % len(cfg.stocktwitkeys)
+	key = cfg.stocktwitkeys[idx]
 	return host, key, nil
 }
 

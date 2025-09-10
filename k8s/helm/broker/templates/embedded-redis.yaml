@@ -34,7 +34,7 @@ spec:
       containers:
         - name: redis
           image: {{ default "redis:7-alpine" $er.image | quote }}
-          imagePullPolicy: {{ default "IfNotPresent" $er.imagePullPolicy | quote }}
+          imagePullPolicy: {{ default "Always" $er.imagePullPolicy | quote }}
           ports:
             - containerPort: {{ default 6379 $er.port }}
           args: ["--save", "''", "--appendonly", "no"]
