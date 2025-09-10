@@ -83,56 +83,88 @@ func waitForRedis(ctx context.Context, rdb *redis.Client) {
 }
 
 func newServer() *Server {
-	// Load file-backed config (no envs)
-	cfg, err := LoadConfig()
-	if err != nil {
-		log.Fatalf("load config.json: %v", err)
-	}
+    // Load file-backed config (no envs)
+    cfg, err := LoadConfig()
+    if err != nil {
+        log.Fatalf("load config.json: %v", err)
+    }
 
-	// Redis client (addr should be "127.0.0.1:6379" for sidecar or a real endpoint)
-	rdb := redis.NewClient(&redis.Options{
-		Addr: GetRedisAddr(cfg),
-		DB:   0,
-	})
-	// Wait (with backoff) until Redis responds
-	waitForRedis(context.Background(), rdb)
+    // Redis client (addr should be "127.0.0.1:6379" for sidecar or a real endpoint)
+    rdb := redis.NewClient(&redis.Options{
+        Addr: GetRedisAddr(cfg),
+        DB:   0,
+    })
+    // Wait (with backoff) until Redis responds
+    waitForRedis(context.Background(), rdb)
 
-	// Stocktwits rate/host/keys from config.json
-	host := GetStocktwitsHost(cfg)                // default "stocktwits.p.rapidapi.com"
-	rate, burst, maxInf := GetStocktwitsRate(cfg) // defaults 0.2777778, 10, 1
-	keys, err := Loadstocktwitkeys()              // required: config.json.stocktwit_keys
-	if err != nil || len(keys) == 0 {
-		log.Fatalf("rapidapi keys: %v", err)
-	}
+    // Build API configurations dynamically.  We always register Stocktwits.
+    apis := make(map[string]*APIConfig)
 
-	apiCfg := &APIConfig{
-		Name:        "stocktwits",
-		Host:        host,
-		RatePerSec:  rate,
-		Burst:       burst,
-		MaxInflight: maxInf,
-		Keys:        keys,
-	}
+    // --- STOCKTWITS ---
+    stHost := GetStocktwitsHost(cfg)                // default "stocktwits.p.rapidapi.com"
+    stRate, stBurst, stMaxInf := GetStocktwitsRate(cfg) // defaults 0.2777778, 10, 1
+    stKeys, err := Loadstocktwitkeys()              // required: config.json.stocktwit_keys
+    if err != nil || len(stKeys) == 0 {
+        log.Fatalf("rapidapi keys (stocktwit_keys): %v", err)
+    }
+    apis["stocktwits"] = &APIConfig{
+        Name:        "stocktwits",
+        Host:        stHost,
+        RatePerSec:  stRate,
+        Burst:       stBurst,
+        MaxInflight: stMaxInf,
+        Keys:        stKeys,
+    }
 
-	// Load Lua scripts
-	ctx := context.Background()
-	acqSHA, err := rdb.ScriptLoad(ctx, acquireLua).Result()
-	if err != nil {
-		log.Fatalf("load acquire script: %v", err)
-	}
-	repSHA, err := rdb.ScriptLoad(ctx, reportLua).Result()
-	if err != nil {
-		log.Fatalf("load report script: %v", err)
-	}
+    // --- YOUTUBE ---
+    // Determine if YouTube should be registered.  If the host is empty, we skip.
+    ytHost := GetYouTubeHost(cfg)
+    if strings.TrimSpace(ytHost) != "" {
+        ytRate, ytBurst, ytMaxInf := GetYouTubeRate(cfg)
+        ytKeys, ytErr := Loadyoutubekeys() // optional; may be empty
+        if ytErr != nil {
+            // Log as warning; fallback will happen below if keys empty
+            log.Printf("WARN: youtube_keys load error: %v (will try fallback to stocktwit_keys)", ytErr)
+        }
+        if len(ytKeys) == 0 {
+            ytKeys = stKeys
+            log.Printf("youtube_keys not provided; falling back to stocktwit_keys (%d key(s))", len(ytKeys))
+        }
+        if len(ytKeys) == 0 {
+            log.Printf("no RapidAPI keys available for youtube; 'youtube' API will not be registered")
+        } else {
+            apis["youtube"] = &APIConfig{
+                Name:        "youtube",
+                Host:        ytHost,
+                RatePerSec:  ytRate,
+                Burst:       ytBurst,
+                MaxInflight: ytMaxInf,
+                Keys:        ytKeys,
+            }
+        }
+    } else {
+        log.Printf("youtube host not configured; 'youtube' API will not be available")
+    }
 
-	return &Server{
-		rdb:      rdb,
-		apis:     map[string]*APIConfig{"stocktwits": apiCfg},
-		acqSHA:   acqSHA,
-		repSHA:   repSHA,
-		rrKeyFmt: "rl:%s:rr",
-		keyFmt:   "rl:%s:%d",
-	}
+    // Load Lua scripts
+    ctx := context.Background()
+    acqSHA, err := rdb.ScriptLoad(ctx, acquireLua).Result()
+    if err != nil {
+        log.Fatalf("load acquire script: %v", err)
+    }
+    repSHA, err := rdb.ScriptLoad(ctx, reportLua).Result()
+    if err != nil {
+        log.Fatalf("load report script: %v", err)
+    }
+
+    return &Server{
+        rdb:      rdb,
+        apis:     apis,
+        acqSHA:   acqSHA,
+        repSHA:   repSHA,
+        rrKeyFmt: "rl:%s:rr",
+        keyFmt:   "rl:%s:%d",
+    }
 }
 
 func (s *Server) apiOrErr(name string) (*APIConfig, error) {

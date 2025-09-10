@@ -10,6 +10,10 @@ import (
 
 // ----- JSON schema we expect in /app/config.json -----
 
+// StocktwitsLimits holds rate limiting settings for the Stocktwits API.
+// When a field is zero or empty in the config file, a reasonable default
+// will be supplied by helper functions below.  See GetStocktwitsRate for
+// defaults.
 type StocktwitsLimits struct {
 	Host        string  `json:"host"`         // e.g. "stocktwits.p.rapidapi.com"
 	RatePerSec  float64 `json:"rate_per_sec"` // e.g. 0.2777778
@@ -17,9 +21,25 @@ type StocktwitsLimits struct {
 	MaxInflight int     `json:"max_inflight"` // e.g. 1
 }
 
+// YouTubeLimits holds rate limiting settings for the YouTube RapidAPI proxy.
+// When fields are zero or empty in the config file, helper functions will
+// supply sane defaults.  See GetYouTubeRate for defaults.
+type YouTubeLimits struct {
+    Host        string  `json:"host"`
+    RatePerSec  float64 `json:"rate_per_sec"`
+    Burst       int     `json:"burst"`
+    MaxInflight int     `json:"max_inflight"`
+}
+
+// BrokerConfig groups Redis connection information and per-API rate limit
+// settings.  A new Youtube section has been added to allow configuring
+// the RapidAPI YouTube proxy.  If the Youtube section is omitted or
+// contains zero values, helper functions will fall back to defaults and
+// a fallback key pool.
 type BrokerConfig struct {
-	RedisAddr  string           `json:"redis_addr"` // e.g. "redis:6379"
-	Stocktwits StocktwitsLimits `json:"stocktwits"`
+    RedisAddr  string           `json:"redis_addr"` // e.g. "redis:6379"
+    Stocktwits StocktwitsLimits `json:"stocktwits"`
+    Youtube    YouTubeLimits    `json:"youtube"`
 }
 
 type Config struct {
@@ -103,6 +123,83 @@ func GetStocktwitsRate(cfg Config) (rate float64, burst, maxInflight int) {
 	}
 	return
 }
+
+// GetYouTubeHost returns the RapidAPI host for the YouTube API from the
+// configuration.  If the host is missing or empty, a reasonable default
+// (youtube-v3-lite.p.rapidapi.com) is returned.  This helper allows
+// older config files to omit the youtube.host field entirely.
+func GetYouTubeHost(cfg Config) string {
+    if h := strings.TrimSpace(cfg.Broker.Youtube.Host); h != "" {
+        return h
+    }
+    // Default host for the RapidAPI YouTube proxy
+    return "youtube-v3-lite.p.rapidapi.com"
+}
+
+// getYouTubeHost is a lowercase alias for GetYouTubeHost.  It is provided
+// solely for backwards compatibility with code that may call the helper
+// using a lowercase initial letter.
+func getYouTubeHost(cfg Config) string { return GetYouTubeHost(cfg) }
+
+// GetYouTubeRate returns the rate limit settings for the YouTube API.  If
+// any of the values are zero or negative in the loaded configuration,
+// sane defaults are provided: ratePerSec = 0.1388888, burst = 10,
+// maxInflight = 1.  These defaults correspond roughly to a 500 requests
+// per day quota on RapidAPI.
+func GetYouTubeRate(cfg Config) (rate float64, burst, maxInflight int) {
+    rate = cfg.Broker.Youtube.RatePerSec
+    if rate <= 0 {
+        // Default to ~500 calls/day (0.1388888 rps)
+        rate = 0.1388888
+    }
+    burst = cfg.Broker.Youtube.Burst
+    if burst <= 0 {
+        burst = 10
+    }
+    maxInflight = cfg.Broker.Youtube.MaxInflight
+    if maxInflight <= 0 {
+        maxInflight = 1
+    }
+    return
+}
+
+// getYouTubeRate is a lowercase alias for GetYouTubeRate.  It exists so
+// that code can call either function without regard to capitalization.
+func getYouTubeRate(cfg Config) (float64, int, int) { return GetYouTubeRate(cfg) }
+
+// getyoutubehost is an additional alias that matches a completely
+// lowercase invocation.  Some code may call getyoutubehost(cfg) with
+// all lowercase letters; this function forwards to GetYouTubeHost.
+func getyoutubehost(cfg Config) string { return GetYouTubeHost(cfg) }
+
+// getyoutuberate is an additional alias that matches a completely
+// lowercase invocation.  It forwards to GetYouTubeRate.
+func getyoutuberate(cfg Config) (float64, int, int) { return GetYouTubeRate(cfg) }
+
+// Loadyoutubekeys loads the RapidAPI keys for the YouTube API from
+// config.json.  It trims whitespace, deduplicates entries, and returns
+// an error only if config loading fails.  If youtube_keys is absent or
+// empty, the returned slice will be empty; callers are expected to
+// implement their own fallback (e.g. falling back to stocktwit_keys) if
+// appropriate.
+func Loadyoutubekeys() ([]string, error) {
+    cfg, err := LoadConfig()
+    if err != nil {
+        return nil, err
+    }
+    // The YouTube keys live under cfg.YouTubeAPIKeys; older configs may
+    // omit this field entirely.  We do not treat an empty list as an
+    // error here to allow fallbacks in the caller.
+    if len(cfg.YouTubeAPIKeys) == 0 {
+        return []string{}, nil
+    }
+    return dedupeTrim(cfg.YouTubeAPIKeys), nil
+}
+
+// loadyoutubekeys is a lowercase alias for Loadyoutubekeys.  It exists
+// purely for compatibility with code that might call the helper with a
+// lowercase initial letter.
+func loadyoutubekeys() ([]string, error) { return Loadyoutubekeys() }
 
 func dedupeTrim(in []string) []string {
 	seen := make(map[string]struct{}, len(in))
