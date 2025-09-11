@@ -25,10 +25,10 @@ type StocktwitsLimits struct {
 // When fields are zero or empty in the config file, helper functions will
 // supply sane defaults.  See GetYouTubeRate for defaults.
 type YouTubeLimits struct {
-    Host        string  `json:"host"`
-    RatePerSec  float64 `json:"rate_per_sec"`
-    Burst       int     `json:"burst"`
-    MaxInflight int     `json:"max_inflight"`
+	Host        string  `json:"host"`
+	RatePerSec  float64 `json:"rate_per_sec"`
+	Burst       int     `json:"burst"`
+	MaxInflight int     `json:"max_inflight"`
 }
 
 // BrokerConfig groups Redis connection information and per-API rate limit
@@ -37,9 +37,9 @@ type YouTubeLimits struct {
 // contains zero values, helper functions will fall back to defaults and
 // a fallback key pool.
 type BrokerConfig struct {
-    RedisAddr  string           `json:"redis_addr"` // e.g. "redis:6379"
-    Stocktwits StocktwitsLimits `json:"stocktwits"`
-    Youtube    YouTubeLimits    `json:"youtube"`
+	RedisAddr  string           `json:"redis_addr"` // e.g. "redis:6379"
+	Stocktwits StocktwitsLimits `json:"stocktwits"`
+	Youtube    YouTubeLimits    `json:"youtube"`
 }
 
 type Config struct {
@@ -129,17 +129,12 @@ func GetStocktwitsRate(cfg Config) (rate float64, burst, maxInflight int) {
 // (youtube-v3-lite.p.rapidapi.com) is returned.  This helper allows
 // older config files to omit the youtube.host field entirely.
 func GetYouTubeHost(cfg Config) string {
-    if h := strings.TrimSpace(cfg.Broker.Youtube.Host); h != "" {
-        return h
-    }
-    // Default host for the RapidAPI YouTube proxy
-    return "youtube-v3-lite.p.rapidapi.com"
+	if h := strings.TrimSpace(cfg.Broker.Youtube.Host); h != "" {
+		return h
+	}
+	// Default host for the RapidAPI YouTube proxy
+	return "youtube-v3-lite.p.rapidapi.com"
 }
-
-// getYouTubeHost is a lowercase alias for GetYouTubeHost.  It is provided
-// solely for backwards compatibility with code that may call the helper
-// using a lowercase initial letter.
-func getYouTubeHost(cfg Config) string { return GetYouTubeHost(cfg) }
 
 // GetYouTubeRate returns the rate limit settings for the YouTube API.  If
 // any of the values are zero or negative in the loaded configuration,
@@ -147,20 +142,20 @@ func getYouTubeHost(cfg Config) string { return GetYouTubeHost(cfg) }
 // maxInflight = 1.  These defaults correspond roughly to a 500 requests
 // per day quota on RapidAPI.
 func GetYouTubeRate(cfg Config) (rate float64, burst, maxInflight int) {
-    rate = cfg.Broker.Youtube.RatePerSec
-    if rate <= 0 {
-        // Default to ~500 calls/day (0.1388888 rps)
-        rate = 0.1388888
-    }
-    burst = cfg.Broker.Youtube.Burst
-    if burst <= 0 {
-        burst = 10
-    }
-    maxInflight = cfg.Broker.Youtube.MaxInflight
-    if maxInflight <= 0 {
-        maxInflight = 1
-    }
-    return
+	rate = cfg.Broker.Youtube.RatePerSec
+	if rate <= 0 {
+		// Default to ~500 calls/day (0.1388888 rps)
+		rate = 0.1388888
+	}
+	burst = cfg.Broker.Youtube.Burst
+	if burst <= 0 {
+		burst = 10
+	}
+	maxInflight = cfg.Broker.Youtube.MaxInflight
+	if maxInflight <= 0 {
+		maxInflight = 1
+	}
+	return
 }
 
 // getYouTubeRate is a lowercase alias for GetYouTubeRate.  It exists so
@@ -183,17 +178,17 @@ func getyoutuberate(cfg Config) (float64, int, int) { return GetYouTubeRate(cfg)
 // implement their own fallback (e.g. falling back to stocktwit_keys) if
 // appropriate.
 func Loadyoutubekeys() ([]string, error) {
-    cfg, err := LoadConfig()
-    if err != nil {
-        return nil, err
-    }
-    // The YouTube keys live under cfg.YouTubeAPIKeys; older configs may
-    // omit this field entirely.  We do not treat an empty list as an
-    // error here to allow fallbacks in the caller.
-    if len(cfg.YouTubeAPIKeys) == 0 {
-        return []string{}, nil
-    }
-    return dedupeTrim(cfg.YouTubeAPIKeys), nil
+	cfg, err := LoadConfig()
+	if err != nil {
+		return nil, err
+	}
+	// The YouTube keys live under cfg.YouTubeAPIKeys; older configs may
+	// omit this field entirely.  We do not treat an empty list as an
+	// error here to allow fallbacks in the caller.
+	if len(cfg.YouTubeAPIKeys) == 0 {
+		return []string{}, nil
+	}
+	return dedupeTrim(cfg.YouTubeAPIKeys), nil
 }
 
 // loadyoutubekeys is a lowercase alias for Loadyoutubekeys.  It exists
