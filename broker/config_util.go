@@ -126,26 +126,26 @@ func GetStocktwitsRate(cfg Config) (rate float64, burst, maxInflight int) {
 
 // GetYouTubeHost returns the RapidAPI host for the YouTube API from the
 // configuration.  If the host is missing or empty, a reasonable default
-// (youtube-v311.p.rapidapi.com) is returned.  This helper allows
+// youtube.googleapis.com/youtube/v3) is returned.  This helper allows
 // older config files to omit the youtube.host field entirely.
 func GetYouTubeHost(cfg Config) string {
 	if h := strings.TrimSpace(cfg.Broker.Youtube.Host); h != "" {
 		return h
 	}
 	// Default host for the RapidAPI YouTube proxy
-	return "youtube-v311.p.rapidapi.com"
+	return "youtube.googleapis.com/youtube/v3"
 }
 
 // GetYouTubeRate returns the rate limit settings for the YouTube API.  If
 // any of the values are zero or negative in the loaded configuration,
-// sane defaults are provided: ratePerSec = 0.1388888, burst = 10,
-// maxInflight = 1.  These defaults correspond roughly to a 500 requests
+// sane defaults are provided: ratePerSec = 0.277778, burst = 10,
+// maxInflight = 1.  These defaults correspond roughly to a 1000 requests
 // per day quota on RapidAPI.
 func GetYouTubeRate(cfg Config) (rate float64, burst, maxInflight int) {
 	rate = cfg.Broker.Youtube.RatePerSec
 	if rate <= 0 {
-		// Default to ~500 calls/day (0.1388888 rps)
-		rate = 0.1388888
+		// Default to ~1000 calls/day (0.277778 rps)
+		rate = 0.277778
 	}
 	burst = cfg.Broker.Youtube.Burst
 	if burst <= 0 {
@@ -157,19 +157,6 @@ func GetYouTubeRate(cfg Config) (rate float64, burst, maxInflight int) {
 	}
 	return
 }
-
-// getYouTubeRate is a lowercase alias for GetYouTubeRate.  It exists so
-// that code can call either function without regard to capitalization.
-func getYouTubeRate(cfg Config) (float64, int, int) { return GetYouTubeRate(cfg) }
-
-// getyoutubehost is an additional alias that matches a completely
-// lowercase invocation.  Some code may call getyoutubehost(cfg) with
-// all lowercase letters; this function forwards to GetYouTubeHost.
-func getyoutubehost(cfg Config) string { return GetYouTubeHost(cfg) }
-
-// getyoutuberate is an additional alias that matches a completely
-// lowercase invocation.  It forwards to GetYouTubeRate.
-func getyoutuberate(cfg Config) (float64, int, int) { return GetYouTubeRate(cfg) }
 
 // Loadyoutubekeys loads the RapidAPI keys for the YouTube API from
 // config.json.  It trims whitespace, deduplicates entries, and returns
@@ -190,11 +177,6 @@ func Loadyoutubekeys() ([]string, error) {
 	}
 	return dedupeTrim(cfg.YouTubeAPIKeys), nil
 }
-
-// loadyoutubekeys is a lowercase alias for Loadyoutubekeys.  It exists
-// purely for compatibility with code that might call the helper with a
-// lowercase initial letter.
-func loadyoutubekeys() ([]string, error) { return Loadyoutubekeys() }
 
 func dedupeTrim(in []string) []string {
 	seen := make(map[string]struct{}, len(in))
