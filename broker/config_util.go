@@ -126,14 +126,14 @@ func GetStocktwitsRate(cfg Config) (rate float64, burst, maxInflight int) {
 
 // GetYouTubeHost returns the RapidAPI host for the YouTube API from the
 // configuration.  If the host is missing or empty, a reasonable default
-// (youtube-v3-lite.p.rapidapi.com) is returned.  This helper allows
+// (youtube-v311.p.rapidapi.com) is returned.  This helper allows
 // older config files to omit the youtube.host field entirely.
 func GetYouTubeHost(cfg Config) string {
 	if h := strings.TrimSpace(cfg.Broker.Youtube.Host); h != "" {
 		return h
 	}
 	// Default host for the RapidAPI YouTube proxy
-	return "youtube-v3-lite.p.rapidapi.com"
+	return "youtube-v311.p.rapidapi.com"
 }
 
 // GetYouTubeRate returns the rate limit settings for the YouTube API.  If
