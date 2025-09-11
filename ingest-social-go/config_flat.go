@@ -66,5 +66,5 @@ func getYouTubeAPIKey() (string, error) {
 	if len(cfg.Youtubekeys) > 0 && cfg.Youtubekeys[0] != "" {
 		return cfg.Youtubekeys[0], nil
 	}
-	return "", errors.New("no YouTube key found in config.json (youtube_api_keys)")
+	return "", errors.New("no YouTube key found in config.json (youtube_keys)")
 }

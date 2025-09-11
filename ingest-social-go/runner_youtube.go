@@ -374,6 +374,7 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 							break
 						}
 						// Emit the raw comment page. We include the full response JSON for downstream processing.
+
 						commentRec := map[string]any{
 							"stage":         StageRaw,
 							"type":          "youtube_comment_page",
@@ -382,6 +383,7 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 							"ingest_date":   ingestDate,
 							"job_id":        jobID,
 							"video_id":      vid,
+							"published_at":  item.Snippet.PublishedAt,
 							"page_token":    commentPage,
 							"response_json": string(cBody),
 						}
