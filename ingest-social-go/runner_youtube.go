@@ -13,7 +13,32 @@ import (
 
 	// strconv is imported for completeness but unused in this file
 	_ "strconv"
+	"html"
+	"regexp"
 )
+
+// cleanYTText decodes HTML entities, preserves emojis, strips tags (except <br>), and normalizes spaces.
+var tagRe = regexp.MustCompile(`<[^>]+>`)
+var zwRe = regexp.MustCompile(`[\u200B-\u200D\uFEFF]`)
+
+func cleanYTText(s string) string {
+	if s == "" { return s }
+	// Normalize line breaks: treat <br> tags as newlines
+	s = strings.ReplaceAll(s, "<br>", "\n")
+	s = strings.ReplaceAll(s, "<br/>", "\n")
+	s = strings.ReplaceAll(s, "<br />", "\n")
+	// Strip remaining HTML tags but keep emojis (they are normal Unicode)
+	s = tagRe.ReplaceAllString(s, "")
+	// Decode HTML entities (e.g., &amp; <)
+	s = html.UnescapeString(s)
+	// Strip zero-width chars
+	s = zwRe.ReplaceAllString(s, "")
+	// Normalize whitespace
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	s = strings.TrimSpace(s)
+	return s
+}
 
 // searchQueries returns a list of search terms to use when harvesting
 // YouTube videos for a given ticker. These queries are designed to
@@ -308,7 +333,7 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 					"video_id":      vid,
 					"published_at":  item.Snippet.PublishedAt,
 					"title":         item.Snippet.Title,
-					"description":   item.Snippet.Description,
+					"description":   cleanYTText(item.Snippet.Description),
 					"channel_id":    item.Snippet.ChannelID,
 					"channel_title": item.Snippet.ChannelTitle,
 					"search_term":   term,
@@ -375,32 +400,52 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 						}
 						// Emit the raw comment page. We include the full response JSON for downstream processing.
 
-						commentRec := map[string]any{
-							"stage":         StageRaw,
-							"type":          "youtube_comment_page",
-							"source":        source,
-							"ticker":        ticker,
-							"ingest_date":   ingestDate,
-							"job_id":        jobID,
-							"video_id":      vid,
-							"published_at":  item.Snippet.PublishedAt,
-							"page_token":    commentPage,
-							"response_json": string(cBody),
-						}
-						commentRowKey := "comments:" + vid
-						if commentPage != "" {
-							commentRowKey += ":" + commentPage
-						}
-						if err := pub.AddRecord(source, ticker, commentRowKey, commentRec); err != nil {
-							emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("publish comments: %v", err)})
-							return err
-						}
-						// Attempt to parse nextPageToken from the response to continue paginating
-						var cr struct {
-							NextPageToken string `json:"nextPageToken"`
-						}
-						_ = json.Unmarshal(cBody, &cr)
-						if cr.NextPageToken == "" {
+						
+// Parse the commentThreads response and emit compact comment records
+var cRespObj struct {
+    NextPageToken string `json:"nextPageToken"`
+    Items []struct {
+        Snippet struct {
+            TopLevelComment struct {
+                ID string `json:"id"`
+                Snippet struct {
+                    TextOriginal      string `json:"textOriginal"`
+                    AuthorDisplayName string `json:"authorDisplayName"`
+                    LikeCount         int    `json:"likeCount"`
+                    PublishedAt       string `json:"publishedAt"`
+                } `json:"snippet"`
+            } `json:"topLevelComment"`
+        } `json:"snippet"`
+    } `json:"items"`
+}
+_ = json.Unmarshal(cBody, &cRespObj)
+for _, it := range cRespObj.Items {
+    c := it.Snippet.TopLevelComment
+    rec := map[string]any{
+        "stage":           StageRaw,
+        "type":            "youtube_comment",
+        "source":          source,
+        "ticker":          ticker,
+        "ingest_date":     ingestDate,
+        "job_id":          jobID,
+        "video_id":        vid,
+        "comment_id":      c.ID,
+        "text":            cleanYTText(c.Snippet.TextOriginal),
+        "likes":           c.Snippet.LikeCount,
+        "author_username": c.Snippet.AuthorDisplayName,
+        "published_at":    c.Snippet.PublishedAt,
+    }
+    commentRowKey := "com:" + vid + ":" + c.ID
+    if err := pub.AddRecord(source, ticker, commentRowKey, rec); err != nil {
+        emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("publish comment: %v", err)})
+        return err
+    }
+}
+// Continue pagination if the API returned a nextPageToken
+var cr struct{ NextPageToken string `json:"nextPageToken"` }
+_ = json.Unmarshal(cBody, &cr)
+if cr.NextPageToken == "" {
+if cr.NextPageToken == "" {
 							break
 						}
 						commentPage = cr.NextPageToken
