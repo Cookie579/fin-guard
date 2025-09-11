@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"time"
 )
 
 // DefaultRapidAPIHost is the fallback host for RapidAPI StockTwits if none is provided
@@ -26,6 +25,7 @@ type FlatConfig struct {
 	ReferenceStream string   `json:"reference_stream"`
 	AWSRegion       string   `json:"aws_region"`
 	Stocktwitkeys   []string `json:"stocktwit_keys"`
+	Youtubekeys     []string `json:"youtube_keys"`
 	RapidAPIHost    string   `json:"rapidapi_host"`
 }
 
@@ -55,28 +55,6 @@ func loadFlatConfig() (*FlatConfig, error) {
 	return &c, nil
 }
 
-// getRapidAPIHostAndKey returns a RapidAPI host and one API key from the
-// configuration. The host is config.rapidapi_host if present, else
-// DefaultRapidAPIHost. The key is selected from config.stocktwit_keys using
-// a simple round-robin based on the current Unix timestamp to spread
-// requests across keys. An error is returned if no keys are found.
-func getRapidAPIHostAndKey() (host, key string, err error) {
-	cfg, err := loadFlatConfig()
-	if err != nil {
-		return "", "", err
-	}
-	host = cfg.RapidAPIHost
-	if host == "" {
-		host = DefaultRapidAPIHost
-	}
-	if len(cfg.Stocktwitkeys) == 0 {
-		return "", "", errors.New("no RapidAPI keys found in config.json (stocktwit_keys)")
-	}
-	idx := int(time.Now().Unix()) % len(cfg.Stocktwitkeys)
-	key = cfg.Stocktwitkeys[idx]
-	return host, key, nil
-}
-
 // getYouTubeAPIKey selects a YouTube API key from the configuration. It
 // returns config.google_api_key if set, otherwise the first entry in
 // config.google_api_keys. An error is returned if neither is provided.
@@ -85,11 +63,8 @@ func getYouTubeAPIKey() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if cfg.GoogleAPIKey != "" {
-		return cfg.GoogleAPIKey, nil
+	if len(cfg.Youtubekeys) > 0 && cfg.Youtubekeys[0] != "" {
+		return cfg.Youtubekeys[0], nil
 	}
-	if len(cfg.GoogleAPIKeys) > 0 && cfg.GoogleAPIKeys[0] != "" {
-		return cfg.GoogleAPIKeys[0], nil
-	}
-	return "", errors.New("no YouTube key found in config.json (google_api_key/google_api_keys)")
+	return "", errors.New("no YouTube key found in config.json (youtube_api_keys)")
 }

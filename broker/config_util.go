@@ -132,7 +132,7 @@ func GetYouTubeHost(cfg Config) string {
 	if h := strings.TrimSpace(cfg.Broker.Youtube.Host); h != "" {
 		return h
 	}
-	// Default host for the RapidAPI YouTube proxy
+	// Default host for the GCP YouTube proxy
 	return "youtube.googleapis.com/youtube/v3"
 }
 
