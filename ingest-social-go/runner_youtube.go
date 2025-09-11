@@ -184,7 +184,7 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 			// or playlists. pageToken is included when paging.
 			q := url.Values{}
 			q.Set("q", term)
-			q.Set("part", "id,snippet,contentDetails")
+			q.Set("part", "id,snippet")
 			q.Set("type", "video")
 			q.Set("order", "date")
 			if pageToken != "" {
@@ -223,31 +223,49 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 			// Parse the search results. We only need id.videoId and
 			// snippet.publishedAt plus snippet.title/description and
 			// channel info for metadata.
-			var searchRes struct {
-				NextPageToken string `json:"nextPageToken"`
-				Items         []struct {
-					ID struct {
-						VideoID string `json:"videoId"`
-					} `json:"id"`
-					Snippet struct {
-						PublishedAt  string `json:"publishedAt"`
-						PublishTime  string `json:"publishTime"`
-						Title        string `json:"title"`
-						Description  string `json:"description"`
-						ChannelID    string `json:"channelId"`
-						ChannelTitle string `json:"channelTitle"`
-					} `json:"snippet"`
-					ContentDetails struct {
-						PublishTime string `json:"publishTime"`
-					} `json:"contentDetails"`
-				} `json:"items"`
-			}
+			
+var searchRes struct {
+    NextPageToken string `json:"nextPageToken"`
+    Items         []struct {
+        ID struct {
+            VideoID string `json:"videoId"`
+        } `json:"id"`
+        Snippet struct {
+            PublishedAt  string `json:"publishedAt"`
+            PublishTime  string `json:"publishTime"`
+            Title        string `json:"title"`
+            Description  string `json:"description"`
+            ChannelID    string `json:"channelId"`
+            ChannelTitle string `json:"channelTitle"`
+        } `json:"snippet"`
+    } `json:"items"`
+}
+
 			if err := json.Unmarshal(body, &searchRes); err != nil {
 				emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("unmarshal: %v", err)})
 				return err
 			}
 			if len(searchRes.Items) == 0 {
 				break
+			}
+
+            	// Build list of video IDs on this page and fetch publishedAt via /videos. The
+            	// RapidAPI YouTube Lite proxy does not always include snippet.publishedAt
+            	// in search results, so we batch fetch the authoritative publishedAt via
+            	// the /videos endpoint. The returned map associates each video ID with
+            	// its RFC3339 publishedAt timestamp. Any errors retrieving this data
+            	// should terminate the job since downstream consumers rely on a valid
+            	// published_at field.
+			idsThisPage := make([]string, 0, len(searchRes.Items))
+			for _, it := range searchRes.Items {
+				if it.ID.VideoID != "" {
+					idsThisPage = append(idsThisPage, it.ID.VideoID)
+				}
+			}
+			pubMap, err := fetchVideoPublishedMap(ctx, client, lease.Host, lease.Key, idsThisPage)
+			if err != nil {
+				emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("videos fetch: %v", err)})
+				return err
 			}
 
 			// For each video in this search page:
@@ -262,23 +280,24 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 				if _, already := seen[vid]; already {
 					continue
 				}
-				// Parse the publishedAt timestamp. If we can't parse it,
-				// skip the video.
-				pubTime := item.Snippet.PublishedAt
-				if pubTime == "" {
-					pubTime = item.Snippet.PublishTime
-				}
-				if pubTime == "" {
-					pubTime = item.ContentDetails.PublishTime
-				}
-				if pubTime == "" {
-					continue
-				}
-				t, err := time.Parse(time.RFC3339, pubTime)
-				if err != nil {
-					continue
-				}
-				ts := t.Unix()
+				
+// Choose a timestamp: prefer /videos.snippet.publishedAt; fall back to search snippet fields
+pubTime := pubMap[vid]
+if pubTime == "" {
+    pubTime = item.Snippet.PublishedAt
+    if pubTime == "" {
+        pubTime = item.Snippet.PublishTime
+    }
+}
+if pubTime == "" {
+    continue
+}
+t, err := time.Parse(time.RFC3339, pubTime)
+if err != nil {
+    continue
+}
+ts := t.Unix()
+
 				// Skip videos at or before the cutoff.
 				if cutoff > 0 && ts <= cutoff {
 					continue
@@ -464,4 +483,58 @@ func pickPublishedAt(a, b, c string) string {
 		return c
 	}
 	return ""
+}
+
+
+// fetchVideoPublishedMap calls the RapidAPI /videos endpoint for a batch of IDs
+// and returns id -> snippet.publishedAt (RFC3339). It tolerates missing items.
+func fetchVideoPublishedMap(ctx context.Context, client *http.Client, host, key string, ids []string) (map[string]string, error) {
+    out := make(map[string]string, len(ids))
+    if len(ids) == 0 {
+        return out, nil
+    }
+    const maxPer = 50
+    for start := 0; start < len(ids); start += maxPer {
+        end := start + maxPer
+        if end > len(ids) { end = len(ids) }
+        chunk := ids[start:end]
+
+        vq := url.Values{}
+        vq.Set("id", strings.Join(chunk, ","))
+        vq.Set("part", "snippet,contentDetails,statistics")
+        vURL := "https://" + host + "/videos?" + vq.Encode()
+
+        req, _ := http.NewRequestWithContext(ctx, http.MethodGet, vURL, nil)
+        req.Header.Set("X-RapidAPI-Host", host)
+        req.Header.Set("X-RapidAPI-Key",  key)
+        req.Header.Set("User-Agent", "ingest-social-go/1.0")
+
+        resp, err := client.Do(req)
+        if err != nil {
+            return out, err
+        }
+        b, _ := io.ReadAll(resp.Body)
+        resp.Body.Close()
+        if resp.StatusCode != http.StatusOK {
+            return out, fmt.Errorf("videos HTTP %d: %s", resp.StatusCode, string(b))
+        }
+
+        var vr struct {
+            Items []struct {
+                ID      string `json:"id"`
+                Snippet struct {
+                    PublishedAt string `json:"publishedAt"`
+                } `json:"snippet"`
+            } `json:"items"`
+        }
+        if err := json.Unmarshal(b, &vr); err != nil {
+            return out, err
+        }
+        for _, it := range vr.Items {
+            if it.ID != "" && it.Snippet.PublishedAt != "" {
+                out[it.ID] = it.Snippet.PublishedAt
+            }
+        }
+    }
+    return out, nil
 }
