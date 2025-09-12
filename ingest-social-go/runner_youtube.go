@@ -523,6 +523,7 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 		emitMeta("batch_committed", map[string]any{"records": processedVideos})
 		durationMs := time.Since(startTime).Milliseconds()
 		emitMeta("job_completed", map[string]any{"duration_ms": durationMs})
+		fmt.Printf("PROCESSED job_id=%s videos=%d\n", jobID, processedVideos)
 		return nil
 
 	}

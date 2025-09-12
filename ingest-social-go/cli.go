@@ -115,9 +115,9 @@ func main() {
 		fs := flag.NewFlagSet("youtube", flag.ExitOnError)
 		args := &youtubeArgs{}
 		fs.StringVar(&args.Ticker, "ticker", "", "Stock ticker symbol (required)")
-		fs.IntVar(&args.MaxVideos, "max-videos", 100, "max videos to process")
-		fs.IntVar(&args.ExtraPages, "extra-pages", -1, "number of extra comment pages (-1 = all)")
-		fs.IntVar(&args.DelayMS, "delay-ms", 0, "delay between API calls in ms (0-250)")
+		fs.IntVar(&args.MaxVideos, "max-videos", 10, "max videos to process (default 10)")
+		fs.IntVar(&args.ExtraPages, "extra-pages", 0, "number of extra comment pages (0 = none)")
+		fs.IntVar(&args.DelayMS, "delay-ms", 50, "delay between API calls in ms (0-250)")
 		fs.Usage = func() {
 			fmt.Fprintf(os.Stderr, "Collect YouTube videos and comments for a single ticker.\n\n")
 			fs.PrintDefaults()
