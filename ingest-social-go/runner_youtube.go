@@ -189,14 +189,22 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 	// requested number of videos. We continue on to the next term if
 	// there are no more results or we've hit the limit.
 	for _, term := range terms {
-		if args.MaxVideos > 0 && processedVideos >= args.MaxVideos {
+		maxVideos := args.MaxVideos
+		if maxVideos == 0 {
+			maxVideos = 10
+		}
+		if processedVideos >= maxVideos {
 			break
 		}
 		// Reset page token for each new query.
 		pageToken := ""
 		for {
 			// respect MaxVideos per query
-			if args.MaxVideos > 0 && processedVideos >= args.MaxVideos {
+			maxVideos := args.MaxVideos
+			if maxVideos == 0 {
+				maxVideos = 10
+			}
+			if processedVideos >= maxVideos {
 				break
 			}
 			select {
@@ -227,6 +235,9 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 			q.Set("maxResults", "50")
 			if pageToken != "" {
 				q.Set("pageToken", pageToken)
+			}
+			if cutoff > 0 {
+				q.Set("publishedAfter", time.Unix(cutoff, 0).UTC().Format(time.RFC3339))
 			}
 			// Use Google's YouTube Data API endpoint
 			q.Set("key", apiKey)
@@ -285,8 +296,13 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 			}
 
 			// For each video in this search page:
+			pageOlder := false
 			for _, item := range searchRes.Items {
-				if args.MaxVideos > 0 && processedVideos >= args.MaxVideos {
+				maxVideos := args.MaxVideos
+				if maxVideos == 0 {
+					maxVideos = 10
+				}
+				if processedVideos >= maxVideos {
 					break
 				}
 				vid := item.ID.VideoID
@@ -305,6 +321,7 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 				ts := t.Unix()
 				// Skip videos at or before the cutoff.
 				if cutoff > 0 && ts <= cutoff {
+					pageOlder = true
 					continue
 				}
 				seen[vid] = struct{}{}
@@ -337,7 +354,7 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 					"video_id":      vid,
 					"published_at":  item.Snippet.PublishedAt,
 					"title":         item.Snippet.Title,
-					"description":   item.Snippet.Description,
+					"description":   cleanYTText(item.Snippet.Description),
 					"channel_id":    item.Snippet.ChannelID,
 					"channel_title": item.Snippet.ChannelTitle,
 					"search_term":   term,
@@ -353,7 +370,7 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 				// through pages until we exhaust the API or hit the
 				// extra-pages limit. Each page is emitted as a raw
 				// record with the entire response body.
-				if args.ExtraPages < 0 || args.ExtraPages > 0 {
+				if args.ExtraPages > 0 {
 					commentPage := ""
 					pagesLeft := args.ExtraPages
 					for {
@@ -404,78 +421,110 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 						}
 						// Emit the raw comment page. We include the full response JSON for downstream processing.
 
-						commentRec := map[string]any{
-							"stage":         StageRaw,
-							"type":          "youtube_comment_page",
-							"source":        source,
-							"ticker":        ticker,
-							"ingest_date":   ingestDate,
-							"job_id":        jobID,
-							"video_id":      vid,
-							"published_at":  item.Snippet.PublishedAt,
-							"page_token":    commentPage,
-							"response_json": string(cBody),
+						// Parse the commentThreads response and emit compact comment records
+						var cRespObj struct {
+							NextPageToken string `json:"nextPageToken"`
+							Items         []struct {
+								Snippet struct {
+									TopLevelComment struct {
+										ID      string `json:"id"`
+										Snippet struct {
+											TextOriginal      string `json:"textOriginal"`
+											AuthorDisplayName string `json:"authorDisplayName"`
+											LikeCount         int    `json:"likeCount"`
+											PublishedAt       string `json:"publishedAt"`
+										} `json:"snippet"`
+									} `json:"topLevelComment"`
+								} `json:"snippet"`
+							} `json:"items"`
 						}
-						commentRowKey := "comments:" + vid
-						if commentPage != "" {
-							commentRowKey += ":" + commentPage
+						_ = json.Unmarshal(cBody, &cRespObj)
+						for _, it := range cRespObj.Items {
+							c := it.Snippet.TopLevelComment
+							rec := map[string]any{
+								"stage":           StageRaw,
+								"type":            "youtube_comment",
+								"source":          source,
+								"ticker":          ticker,
+								"ingest_date":     ingestDate,
+								"job_id":          jobID,
+								"video_id":        vid,
+								"comment_id":      c.ID,
+								"text":            cleanYTText(c.Snippet.TextOriginal),
+								"likes":           c.Snippet.LikeCount,
+								"author_username": c.Snippet.AuthorDisplayName,
+								"published_at":    c.Snippet.PublishedAt,
+							}
+							commentRowKey := "com:" + vid + ":" + c.ID
+							if err := pub.AddRecord(source, ticker, commentRowKey, rec); err != nil {
+								emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("publish comment: %v", err)})
+								return err
+							}
 						}
-						if err := pub.AddRecord(source, ticker, commentRowKey, commentRec); err != nil {
-							emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("publish comments: %v", err)})
-							return err
-						}
-						// Attempt to parse nextPageToken from the response to continue paginating
 						var cr struct {
 							NextPageToken string `json:"nextPageToken"`
 						}
 						_ = json.Unmarshal(cBody, &cr)
 						if cr.NextPageToken == "" {
-							break
-						}
-						commentPage = cr.NextPageToken
-						if args.ExtraPages > 0 {
-							pagesLeft--
-						}
-						// Sleep a bit before next page to avoid convoy
-						if args.DelayMS > 0 {
-							time.Sleep(time.Duration(args.DelayMS) * time.Millisecond)
-						} else {
-							time.Sleep(50 * time.Millisecond)
+							if cr.NextPageToken == "" {
+								break
+							}
+							commentPage = cr.NextPageToken
+							if args.ExtraPages > 0 {
+								pagesLeft--
+							}
+							// Sleep a bit before next page to avoid convoy
+							if args.DelayMS > 0 {
+								time.Sleep(time.Duration(args.DelayMS) * time.Millisecond)
+							} else {
+								time.Sleep(50 * time.Millisecond)
+							}
 						}
 					}
 				}
-			}
 
-			// If we reached our video limit, stop paging this query
-			if args.MaxVideos > 0 && processedVideos >= args.MaxVideos {
-				break
-			}
+				// If this page is entirely older than cutoff, stop paging (ordered by date)
+				if pageOlder {
+					break
+				}
 
-			// If there are no more pages, break the query loop
-			if searchRes.NextPageToken == "" {
-				break
-			}
-			pageToken = searchRes.NextPageToken
-			// Delay between search pages
-			if args.DelayMS > 0 {
-				time.Sleep(time.Duration(args.DelayMS) * time.Millisecond)
-			} else {
-				time.Sleep(50 * time.Millisecond)
+				// If we reached our video limit, stop paging this query
+				maxVideos = args.MaxVideos
+				if maxVideos == 0 {
+					maxVideos = 10
+				}
+				if processedVideos >= maxVideos {
+					break
+				}
+
+				// If there are no more pages, break the query loop
+				if searchRes.NextPageToken == "" {
+					break
+				}
+				pageToken = searchRes.NextPageToken
+				// Delay between search pages
+				if args.DelayMS > 0 {
+					time.Sleep(time.Duration(args.DelayMS) * time.Millisecond)
+				} else {
+					time.Sleep(50 * time.Millisecond)
+				}
 			}
 		}
-	}
 
-	// Update the state to reflect the latest ingestion time. We call
-	// UpdateYouTubeState which sets last_search_at and updated_at to now.
-	if err := store.UpdateYouTubeState(ctx, ticker); err != nil {
-		emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("state update: %v", err)})
-		return err
-	}
+		// Update the state to reflect the latest ingestion time. We call
+		// UpdateYouTubeState which sets last_search_at and updated_at to now.
+		if err := store.UpdateYouTubeState(ctx, ticker); err != nil {
+			emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("state update: %v", err)})
+			return err
+		}
 
-	// Emit batch and job completion events. The records field counts
-	// videos only, not comment pages.
-	emitMeta("batch_committed", map[string]any{"records": processedVideos})
-	durationMs := time.Since(startTime).Milliseconds()
-	emitMeta("job_completed", map[string]any{"duration_ms": durationMs})
+		// Emit batch and job completion events. The records field counts
+		// videos only, not comment pages.
+		emitMeta("batch_committed", map[string]any{"records": processedVideos})
+		durationMs := time.Since(startTime).Milliseconds()
+		emitMeta("job_completed", map[string]any{"duration_ms": durationMs})
+		return nil
+
+	}
 	return nil
 }
