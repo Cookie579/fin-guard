@@ -182,8 +182,7 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 	// Build the list of search terms. We include the raw ticker as the
 	// first term to capture generic mentions. All other terms come
 	// from searchQueries. We use the original case for search queries.
-	terms := []string{args.Ticker}
-	terms = append(terms, searchQueries(args.Ticker)...)
+	terms := searchQueries(args.Ticker)
 
 	// Iterate through each search term until we have collected the
 	// requested number of videos. We continue on to the next term if
@@ -193,9 +192,7 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 		if maxVideos == 0 {
 			maxVideos = 10
 		}
-		if processedVideos >= maxVideos {
-			break
-		}
+		// NOTE: do not break here; continue iterating terms to ensure targeted queries run
 		// Reset page token for each new query.
 		pageToken := ""
 		for {
@@ -334,12 +331,16 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 				// year from the publishedAt timestamp. InsertYouTubeVideoID
 				// returns a boolean indicating if the insert happened.
 				year := t.UTC().Year()
-				_, err = store.InsertYouTubeVideoID(ctx, ticker, year, vid, time.Now().UTC(), &t, item.Snippet.ChannelID, jobID)
+				inserted, err := store.InsertYouTubeVideoID(ctx, ticker, year, vid, time.Now().UTC(), &t, item.Snippet.ChannelID, jobID)
 				if err != nil {
 					emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("ddb insert: %v", err)})
 					return err
 				}
 
+				// Skip if video ID already exists (duplicate from previous run)
+				if !inserted {
+					continue
+				}
 				// Publish the video metadata record to Kinesis. We use a
 				// rowKey of "vid:<videoId>" so that retries or
 				// duplicates are naturally deduped by downstream
