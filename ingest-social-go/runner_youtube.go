@@ -371,6 +371,10 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 				// extra-pages limit. Each page is emitted as a raw
 				// record with the entire response body.
 				if args.ExtraPages > 0 {
+					fmt.Printf("INFO: fetching comments for video %s (pages=%d)\n", vid, args.ExtraPages)
+				} else {
+					fmt.Printf("INFO: skipping comments for video %s (extra-pages=0)\n", vid)
+
 					commentPage := ""
 					pagesLeft := args.ExtraPages
 					for {
@@ -471,6 +475,10 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 							}
 							commentPage = cr.NextPageToken
 							if args.ExtraPages > 0 {
+								fmt.Printf("INFO: fetching comments for video %s (pages=%d)\n", vid, args.ExtraPages)
+							} else {
+								fmt.Printf("INFO: skipping comments for video %s (extra-pages=0)\n", vid)
+
 								pagesLeft--
 							}
 							// Sleep a bit before next page to avoid convoy
@@ -523,6 +531,7 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 		emitMeta("batch_committed", map[string]any{"records": processedVideos})
 		durationMs := time.Since(startTime).Milliseconds()
 		emitMeta("job_completed", map[string]any{"duration_ms": durationMs})
+		fmt.Printf("JOB_COMPLETED job_id=%s duration_ms=%d\n", jobID, durationMs)
 		fmt.Printf("PROCESSED job_id=%s videos=%d\n", jobID, processedVideos)
 		return nil
 
