@@ -53,7 +53,7 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 		if errors.Is(err, ErrLockNotAcquired) {
 			return err
 		}
-		emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("lock: %v", err)})
+		emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("lock: %v", err)})
 		return err
 	}
 	fmt.Printf("LOCK_ACQUIRED job_id=%s pk=%s#%s\n", jobID, source, strings.ToUpper(ticker))
@@ -80,7 +80,7 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 	// Load state
 	latestID, existingOldest, err := store.GetStocktwitsState(ctx, ticker)
 	if err != nil {
-		emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("state load: %v", err)})
+		emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("state load: %v", err)})
 		return err
 	}
 	if args.SinceID > 0 {
@@ -106,7 +106,7 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 		}
 		select {
 		case <-ctx.Done():
-			emitMeta("job_failed", map[string]any{"reason": "terminated"})
+			emitMeta("job_failed", map[string]any{"error": "terminated"})
 			return fmt.Errorf("terminated")
 		default:
 		}
@@ -141,7 +141,7 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 		// Acquire permit from broker
 		lease, err := acquirePermit(ctx, "stocktwits")
 		if err != nil {
-			emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("broker acquire: %v", err)})
+			emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("broker acquire: %v", err)})
 			return err
 		}
 
@@ -170,12 +170,12 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 		ok := (doErr == nil && status == http.StatusOK)
 		reportResult(ctx, lease.ID, ok, status, retryAfterMs)
 		if doErr != nil {
-			emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("HTTP error: %v", doErr)})
+			emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("HTTP error: %v", doErr)})
 			return doErr
 		}
 		if status != http.StatusOK {
 			err := fmt.Errorf("HTTP %d: %s", status, string(body))
-			emitMeta("job_failed", map[string]any{"reason": err.Error()})
+			emitMeta("job_failed", map[string]any{"error": err.Error()})
 			return err
 		}
 
@@ -206,7 +206,7 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 			} `json:"messages"`
 		}
 		if err := json.Unmarshal(body, &parsed); err != nil {
-			emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("unmarshal: %v", err)})
+			emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("unmarshal: %v", err)})
 			return err
 		}
 
@@ -269,7 +269,7 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 			}
 			rowKey := strconv.FormatInt(msg.ID, 10)
 			if err := pub.AddRecord(source, ticker, rowKey, rec); err != nil {
-				emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("publish: %v", err)})
+				emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("publish: %v", err)})
 				return err
 			}
 			processedCount++
@@ -295,7 +295,7 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 		}
 
 		if err := store.UpdateStocktwitsState(ctx, ticker, latestID, newOldest); err != nil {
-			emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("state update: %v", err)})
+			emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("state update: %v", err)})
 			return err
 		}
 		existingOldest = newOldest

@@ -119,6 +119,7 @@ func fetchVideoCommentCounts(ctx context.Context, client *http.Client, apiKey st
 			ID         string `json:"id"`
 			Statistics struct {
 				CommentCount string `json:"commentCount"`
+                LikeCount    string `json:"likeCount"`
 			} `json:"statistics"`
 		} `json:"items"`
 	}
@@ -461,7 +462,7 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 		if errors.Is(err, ErrLockNotAcquired) {
 			return err
 		}
-		emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("lock: %v", err)})
+		emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("lock: %v", err)})
 		return err
 	}
 	fmt.Printf("LOCK_ACQUIRED job_id=%s pk=%s#%s\n", jobID, source, ticker)
@@ -484,13 +485,13 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 
 	apiKey, err := getYouTubeAPIKey()
 	if err != nil {
-		emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("missing YouTube API key: %v", err)})
+		emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("missing YouTube API key: %v", err)})
 		return err
 	}
 
 	lastSearchAt, err := store.GetYouTubeState(ctx, ticker)
 	if err != nil {
-		emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("state load: %v", err)})
+		emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("state load: %v", err)})
 		return err
 	}
 	var cutoff int64
@@ -691,14 +692,14 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 			}
 			select {
 			case <-ctx.Done():
-				emitMeta("job_failed", map[string]any{"reason": "terminated"})
+				emitMeta("job_failed", map[string]any{"error": "terminated"})
 				return fmt.Errorf("terminated")
 			default:
 			}
 
 			lease, err := acquirePermit(ctx, "youtube")
 			if err != nil {
-				emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("broker acquire: %v", err)})
+				emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("broker acquire: %v", err)})
 				return err
 			}
 
@@ -734,12 +735,12 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 			ok := (doErr == nil && status == http.StatusOK)
 			reportResult(ctx, lease.ID, ok, status, retryAfterMs)
 			if doErr != nil {
-				emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("HTTP error: %v", doErr)})
+				emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("HTTP error: %v", doErr)})
 				return doErr
 			}
 			if status != http.StatusOK {
 				err := fmt.Errorf("HTTP %d: %s", status, string(body))
-				emitMeta("job_failed", map[string]any{"reason": err.Error()})
+				emitMeta("job_failed", map[string]any{"error": err.Error()})
 				return err
 			}
 
@@ -759,7 +760,7 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 				} `json:"items"`
 			}
 			if err := json.Unmarshal(body, &searchRes); err != nil {
-				emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("unmarshal: %v", err)})
+				emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("unmarshal: %v", err)})
 				return err
 			}
 			if len(searchRes.Items) == 0 {
@@ -798,7 +799,7 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 					}
 				}
 				if err := ingestVideo(vid, pubAt, item.Snippet.Title, item.Snippet.Description, item.Snippet.ChannelID, item.Snippet.ChannelTitle, term); err != nil {
-					emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("ingest: %v", err)})
+					emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("ingest: %v", err)})
 					return err
 				}
 			}
@@ -806,7 +807,7 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 			// opportunistic uploads crawl to boost yield (cheap API units)
 			if !done {
 				if err := crawlUploadsForDiscoveredChannels(); err != nil {
-					emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("uploads crawl: %v", err)})
+					emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("uploads crawl: %v", err)})
 					return err
 				}
 			}
@@ -828,12 +829,12 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 
 	// Final comment flush
 	if err := flushPendingComments(); err != nil {
-		emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("flush comments: %v", err)})
+		emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("flush comments: %v", err)})
 		return err
 	}
 
 	if err := store.UpdateYouTubeState(ctx, ticker); err != nil {
-		emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("state update: %v", err)})
+		emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("state update: %v", err)})
 		return err
 	}
 	emitMeta("batch_committed", map[string]any{"records": processedVideos})
