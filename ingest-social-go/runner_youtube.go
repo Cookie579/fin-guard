@@ -18,9 +18,13 @@ import (
 )
 
 // --- YouTube text cleaner (keeps emojis, strips HTML, normalizes) ---
+// brRe matches HTML line breaks, tagRe matches any HTML tag. These are used
+// by cleanYTText to remove markup from comment and description fields while
+// preserving emoji characters.
 var brRe = regexp.MustCompile(`(?i)<br\s*/?>`)
 var tagRe = regexp.MustCompile(`<[^>]+>`)
 
+// stripZeroWidth removes zero width and byte order mark runes from strings.
 func stripZeroWidth(s string) string {
 	return strings.Map(func(r rune) rune {
 		switch r {
@@ -31,6 +35,9 @@ func stripZeroWidth(s string) string {
 	}, s)
 }
 
+// cleanYTText normalizes YouTube text by replacing <br> tags with newlines,
+// unescaping HTML entities, stripping all remaining tags, removing carriage
+// returns and zero width characters, and trimming whitespace.
 func cleanYTText(s string) string {
 	if s == "" {
 		return s
@@ -44,13 +51,10 @@ func cleanYTText(s string) string {
 	return s
 }
 
-// searchQueries returns a list of search terms to use when harvesting
-// YouTube videos for a given ticker. These queries are designed to
-// capture a broad range of news, analysis and investor sentiment around
-// the stock. They are inspired by the legacy ingest-social-go-local
-// implementation. Callers should iterate through the returned terms
-// until they have collected enough fresh videos. All terms include
-// the ticker without transformation so they remain case sensitive.
+// searchQueries returns a slice of search terms for harvesting YouTube
+// videos related to a given stock ticker. These phrases mirror the
+// legacy ingest-social-go-local implementation and avoid using the bare
+// ticker alone. Each term is case sensitive and includes the ticker.
 func searchQueries(tk string) []string {
 	return []string{
 		fmt.Sprintf("$%s stock", tk),
@@ -66,17 +70,17 @@ func searchQueries(tk string) []string {
 	}
 }
 
-// RunYouTubeJob orchestrates a YouTube ingest job using the RapidAPI YouTube
-// v3 Lite proxy. It collects video metadata and comments for a search
-// query derived from the stock ticker. The job avoids duplicates by
-// tracking the last_search_at timestamp in DynamoDB and by inserting
-// discovered video IDs into a per-ticker/year table. It respects
-// context cancellation and job-level limits on videos and comment pages.
+// RunYouTubeJob orchestrates a YouTube ingest job using the Google
+// YouTube Data API. It collects recent video metadata and comments
+// matching a set of search queries derived from the provided stock ticker.
+// The job tracks duplicate videos across runs via DynamoDB and skips
+// reprocessing already-seen videos. It respects context cancellation,
+// job-level video limits and comment page limits via args.MaxVideos and
+// args.ExtraPages. A global rate broker enforces API quotas.
 func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeArgs) error {
-	// The ticker is treated as a search term. We uppercase it for
-	// consistent lock and state keys, but preserve the original case
-	// in search queries. An empty ticker is a programmer error and
-	// should be prevented by CLI parsing.
+	// Ensure a non-empty ticker. We upper-case for lock and state keys but
+	// preserve the original case for search queries. This mirrors the local
+	// behaviour and avoids accidentally lowercasing user-provided tickers.
 	if args.Ticker == "" {
 		return fmt.Errorf("ticker required")
 	}
@@ -84,6 +88,9 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 	source := "youtube"
 	ownerID := jobID
 
+	// Initialise backing store and publisher. Any failure here ends the job
+	// before acquiring the lock, to avoid stale locks or half-initialised
+	// publishers.
 	store, err := NewDynamoStore(ctx)
 	if err != nil {
 		return fmt.Errorf("create dynamo store: %w", err)
@@ -94,9 +101,8 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 	}
 	defer func() { _ = pub.Close(ctx) }()
 
-	// Metadata emitter for events. We always emit using the uppercase
-	// ticker in the 'ticker' field so that Kinesis consumers can
-	// consistently key off this value.
+	// Helper to emit metadata events to Kinesis. All events use the
+	// uppercase ticker to ease downstream partitioning.
 	emitMeta := func(eventType string, extra map[string]any) {
 		rec := map[string]any{
 			"stage":  StageEvents,
@@ -115,9 +121,9 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 
 	emitMeta("job_started", map[string]any{})
 
-	// Acquire a distributed lock to ensure only one job per ticker runs at
-	// a time. Locks are keyed by source#ticker (both lowercased in
-	// DynamoStore implementation).
+	// Acquire a distributed lock per source#ticker. This prevents more than
+	// one concurrent job from processing the same ticker. Locks are keyed
+	// lowercased internally by the store implementation.
 	if err := store.AcquireLock(ctx, source, ticker, ownerID, jobID); err != nil {
 		if errors.Is(err, ErrLockNotAcquired) {
 			return err
@@ -128,7 +134,9 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 	fmt.Printf("LOCK_ACQUIRED job_id=%s pk=%s#%s\n", jobID, source, ticker)
 	defer func() { _ = store.ReleaseLock(context.Background(), source, ticker, ownerID) }()
 
-	// Start heartbeat to keep the lock alive.
+	// Heartbeat goroutine to keep the lock alive. Cancelled when the job
+	// finishes or is cancelled. Any HeartbeatLock error is ignored here; if
+	// the lock expires, subsequent operations will fail gracefully.
 	hbCtx, hbCancel := context.WithCancel(ctx)
 	go func() {
 		t := time.NewTicker(time.Duration(LockHeartbeatSeconds) * time.Second)
@@ -144,18 +152,17 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 	}()
 	defer hbCancel()
 
-	// Load the YouTube Data API (GCP) key from config.json
+	// Load the YouTube API key from config. A missing key terminates the
+	// job immediately.
 	apiKey, err := getYouTubeAPIKey()
 	if err != nil {
 		emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("missing YouTube API key: %v", err)})
 		return err
 	}
 
-	// Determine the cutoff timestamp for fresh videos. The
-	// GetYouTubeState method returns the last_search_at as a pointer to
-	// time. If absent, nil is returned. We convert this to Unix
-	// seconds. Only videos strictly newer than this timestamp are
-	// considered.
+	// Determine the cutoff timestamp for fresh videos. We use the last_search_at
+	// timestamp stored in DynamoDB; only videos strictly newer than this
+	// timestamp are processed. If no prior state exists, cutoff remains zero.
 	lastSearchAt, err := store.GetYouTubeState(ctx, ticker)
 	if err != nil {
 		emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("state load: %v", err)})
@@ -165,45 +172,51 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 	if lastSearchAt != nil {
 		cutoff = lastSearchAt.UTC().Unix()
 	}
-	// Track the maximum publishedAt timestamp we see so we can update
-	// state when finished. If no videos are found, we still update
-	// last_search_at to now so that subsequent runs don't repeatedly
-	// search the same pages.
+	// Track the maximum publishedAt timestamp we encounter during this run
+	// so we can update last_search_at even if no videos are returned.
 	var maxTimestamp int64 = cutoff
 
 	processedVideos := 0
 	startTime := time.Now()
 	client := &http.Client{Timeout: 45 * time.Second}
 
-	// dedup map to avoid processing the same video multiple times when
-	// searching with multiple queries. Keyed by video ID.
+	// Local deduplication: avoids processing the same video twice when
+	// searching with multiple queries in this run.
 	seen := make(map[string]struct{})
 
-	// Build the list of search terms. We include the raw ticker as the
-	// first term to capture generic mentions. All other terms come
-	// from searchQueries. We use the original case for search queries.
+	// Build the list of search terms. Unlike the earlier AWS implementation,
+	// we deliberately omit the bare ticker from the list. This ensures we
+	// execute the targeted queries inspired by the local scraper and
+	// prevents generic results from short-circuiting the search order.
 	terms := searchQueries(args.Ticker)
 
-	// Iterate through each search term until we have collected the
-	// requested number of videos. We continue on to the next term if
-	// there are no more results or we've hit the limit.
+	// done becomes true when we have collected enough videos; it causes
+	// all loops to unwind.
+	done := false
+
+	// Iterate over each search term. We continue through all queries even
+	// after hitting the MaxVideos limit to mirror the local scraper’s
+	// behaviour. Exiting early only occurs when done is set.
 	for _, term := range terms {
-		maxVideos := args.MaxVideos
-		if maxVideos == 0 {
-			maxVideos = 10
+		if done {
+			break
 		}
-		// NOTE: do not break here; continue iterating terms to ensure targeted queries run
-		// Reset page token for each new query.
+		// Reset pageToken for each new term
 		pageToken := ""
 		for {
-			// respect MaxVideos per query
+			// Respect the MaxVideos limit. A zero value means default to 10.
 			maxVideos := args.MaxVideos
 			if maxVideos == 0 {
 				maxVideos = 10
 			}
 			if processedVideos >= maxVideos {
+				// Set done and break out of paging loop for this term. The
+				// outer term loop will also stop on the next iteration.
+				done = true
 				break
 			}
+
+			// Honour context cancellation
 			select {
 			case <-ctx.Done():
 				emitMeta("job_failed", map[string]any{"reason": "terminated"})
@@ -211,19 +224,15 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 			default:
 			}
 
-			// Acquire RapidAPI permit for YouTube for the search call.
+			// Acquire a permit from the rate broker before making a search call
 			lease, err := acquirePermit(ctx, "youtube")
 			if err != nil {
 				emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("broker acquire: %v", err)})
 				return err
 			}
 
-			// Build the search request. We search for the term and
-			// request id,snippet so we can see the videoId and
-			// publishedAt. We sort by date to get the newest videos
-			// first. We also set type=video to filter out channels
-			// or playlists. pageToken is included when paging.
-
+			// Build the search request for the current term. We use part=id,snippet
+			// to retrieve videoId and publishedAt. Results are sorted by date.
 			q := url.Values{}
 			q.Set("q", term)
 			q.Set("part", "id,snippet")
@@ -233,15 +242,16 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 			if pageToken != "" {
 				q.Set("pageToken", pageToken)
 			}
+			// Only request videos published strictly after the cutoff
 			if cutoff > 0 {
 				q.Set("publishedAfter", time.Unix(cutoff, 0).UTC().Format(time.RFC3339))
 			}
-			// Use Google's YouTube Data API endpoint
 			q.Set("key", apiKey)
 			reqURL := "https://www.googleapis.com/youtube/v3/search?" + q.Encode()
 			req, _ := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 			req.Header.Set("User-Agent", "ingest-social-go/1.0")
 
+			// Perform the HTTP request
 			var status int
 			var retryAfterMs int
 			var body []byte
@@ -255,7 +265,6 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 			}
 			ok := (doErr == nil && status == http.StatusOK)
 			reportResult(ctx, lease.ID, ok, status, retryAfterMs)
-
 			if doErr != nil {
 				emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("HTTP error: %v", doErr)})
 				return doErr
@@ -266,9 +275,8 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 				return err
 			}
 
-			// Parse the search results. We only need id.videoId and
-			// snippet.publishedAt plus snippet.title/description and
-			// channel info for metadata.
+			// Parse the search results. We only require the videoId and publishedAt
+			// plus some snippet metadata.
 			var searchRes struct {
 				NextPageToken string `json:"nextPageToken"`
 				Items         []struct {
@@ -288,63 +296,67 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 				emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("unmarshal: %v", err)})
 				return err
 			}
+			// If no items returned, no more pages for this query.
 			if len(searchRes.Items) == 0 {
 				break
 			}
 
-			// For each video in this search page:
+			// pageOlder is set if all remaining videos on this page are at or
+			// before the cutoff. In that case we break the paging loop.
 			pageOlder := false
 			for _, item := range searchRes.Items {
+				if done {
+					break
+				}
+				// Check again for the global video limit
 				maxVideos := args.MaxVideos
 				if maxVideos == 0 {
 					maxVideos = 10
 				}
 				if processedVideos >= maxVideos {
+					done = true
 					break
 				}
 				vid := item.ID.VideoID
 				if vid == "" {
 					continue
 				}
+				// Skip if we've already processed this video in this run
 				if _, already := seen[vid]; already {
 					continue
 				}
-				// Parse the publishedAt timestamp. If we can't parse it,
-				// skip the video.
+				// Parse the publishedAt timestamp; skip if unparsable
 				t, err := time.Parse(time.RFC3339, item.Snippet.PublishedAt)
 				if err != nil {
 					continue
 				}
 				ts := t.Unix()
-				// Skip videos at or before the cutoff.
+				// If older than or equal to the cutoff, mark pageOlder and skip
 				if cutoff > 0 && ts <= cutoff {
 					pageOlder = true
 					continue
 				}
+				// Track video as seen and update maxTimestamp
 				seen[vid] = struct{}{}
 				if ts > maxTimestamp {
 					maxTimestamp = ts
 				}
-
-				// Insert the video ID into the video_id table to aid
-				// deduplication across runs. We derive the partition
-				// year from the publishedAt timestamp. InsertYouTubeVideoID
-				// returns a boolean indicating if the insert happened.
+				// Compute partition year for the video
 				year := t.UTC().Year()
+				// Insert the video ID into DynamoDB. If the insert returns
+				// inserted=false it means we saw this video in a previous run and
+				// should skip reprocessing it.
 				inserted, err := store.InsertYouTubeVideoID(ctx, ticker, year, vid, time.Now().UTC(), &t, item.Snippet.ChannelID, jobID)
 				if err != nil {
 					emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("ddb insert: %v", err)})
 					return err
 				}
-
-				// Skip if video ID already exists (duplicate from previous run)
+				// Skip if this video has been processed in a prior run
 				if !inserted {
 					continue
 				}
-				// Publish the video metadata record to Kinesis. We use a
-				// rowKey of "vid:<videoId>" so that retries or
-				// duplicates are naturally deduped by downstream
-				// consumers.
+				// Build and emit the video metadata record. Use a row key of
+				// "vid:<videoId>" to allow downstream consumers to deduplicate.
 				videoRec := map[string]any{
 					"stage":         StageRaw,
 					"type":          "youtube_video",
@@ -367,28 +379,32 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 				}
 				processedVideos++
 
-				// Now fetch comment threads for this video. We loop
-				// through pages until we exhaust the API or hit the
-				// extra-pages limit. Each page is emitted as a raw
-				// record with the entire response body.
-				if args.ExtraPages > 0 {
-					fmt.Printf("INFO: fetching comments for video %s (pages=%d)\n", vid, args.ExtraPages)
-				} else {
+				// Fetch comments for this video. We implement the ExtraPages
+				// semantics as follows: ExtraPages = -1 fetches all pages,
+				// ExtraPages = 0 fetches none (skip comments), and
+				// ExtraPages = N>0 fetches the first page plus N extra.
+				// We'll always attempt at least one page when ExtraPages >= 1.
+				commentPage := ""
+				pagesLeft := args.ExtraPages
+				// If ExtraPages is zero, skip comments entirely
+				if args.ExtraPages == 0 {
 					fmt.Printf("INFO: skipping comments for video %s (extra-pages=0)\n", vid)
-
-					commentPage := ""
-					pagesLeft := args.ExtraPages
+				} else {
+					if args.ExtraPages > 0 {
+						fmt.Printf("INFO: fetching comments for video %s (pages=%d)\n", vid, args.ExtraPages)
+					}
 					for {
+						// Respect ExtraPages when non-negative
 						if args.ExtraPages >= 0 && pagesLeft == 0 {
 							break
 						}
-						// Acquire a permit for comments call
+						// Acquire permit for comment API call
 						cLease, err := acquirePermit(ctx, "youtube")
 						if err != nil {
 							emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("broker acquire: %v", err)})
 							return err
 						}
-
+						// Build request for commentThreads
 						cq := url.Values{}
 						cq.Set("videoId", vid)
 						cq.Set("part", "snippet")
@@ -397,12 +413,10 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 						if commentPage != "" {
 							cq.Set("pageToken", commentPage)
 						}
-						// Use Google's YouTube Data API commentThreads endpoint
 						cq.Set("key", apiKey)
 						cURL := "https://www.googleapis.com/youtube/v3/commentThreads?" + cq.Encode()
 						creq, _ := http.NewRequestWithContext(ctx, http.MethodGet, cURL, nil)
 						creq.Header.Set("User-Agent", "ingest-social-go/1.0")
-
 						var cStatus int
 						var cRetry int
 						var cBody []byte
@@ -421,12 +435,10 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 							return cErr
 						}
 						if cStatus != http.StatusOK {
-							// If comments are disabled or API fails, just stop comment harvest for this video
+							// Stop comment harvest for this video on non-200
 							break
 						}
-						// Emit the raw comment page. We include the full response JSON for downstream processing.
-
-						// Parse the commentThreads response and emit compact comment records
+						// Parse comment threads
 						var cRespObj struct {
 							NextPageToken string `json:"nextPageToken"`
 							Items         []struct {
@@ -444,6 +456,7 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 							} `json:"items"`
 						}
 						_ = json.Unmarshal(cBody, &cRespObj)
+						// Emit each top-level comment as a raw record
 						for _, it := range cRespObj.Items {
 							c := it.Snippet.TopLevelComment
 							rec := map[string]any{
@@ -466,76 +479,56 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 								return err
 							}
 						}
-						var cr struct {
-							NextPageToken string `json:"nextPageToken"`
+						// Determine the next page token
+						next := cRespObj.NextPageToken
+						if next == "" {
+							break
 						}
-						_ = json.Unmarshal(cBody, &cr)
-						if cr.NextPageToken == "" {
-							if cr.NextPageToken == "" {
-								break
-							}
-							commentPage = cr.NextPageToken
-							if args.ExtraPages > 0 {
-								fmt.Printf("INFO: fetching comments for video %s (pages=%d)\n", vid, args.ExtraPages)
-							} else {
-								fmt.Printf("INFO: skipping comments for video %s (extra-pages=0)\n", vid)
-
-								pagesLeft--
-							}
-							// Sleep a bit before next page to avoid convoy
-							if args.DelayMS > 0 {
-								time.Sleep(time.Duration(args.DelayMS) * time.Millisecond)
-							} else {
-								time.Sleep(50 * time.Millisecond)
-							}
+						commentPage = next
+						// Decrement pagesLeft if ExtraPages > 0
+						if args.ExtraPages > 0 {
+							pagesLeft--
+						}
+						// Delay between comment pages
+						if args.DelayMS > 0 {
+							time.Sleep(time.Duration(args.DelayMS) * time.Millisecond)
+						} else {
+							time.Sleep(50 * time.Millisecond)
 						}
 					}
 				}
+			}
 
-				// If this page is entirely older than cutoff, stop paging (ordered by date)
-				if pageOlder {
-					break
-				}
-
-				// If we reached our video limit, stop paging this query
-				maxVideos = args.MaxVideos
-				if maxVideos == 0 {
-					maxVideos = 10
-				}
-				if processedVideos >= maxVideos {
-					break
-				}
-
-				// If there are no more pages, break the query loop
-				if searchRes.NextPageToken == "" {
-					break
-				}
-				pageToken = searchRes.NextPageToken
-				// Delay between search pages
-				if args.DelayMS > 0 {
-					time.Sleep(time.Duration(args.DelayMS) * time.Millisecond)
-				} else {
-					time.Sleep(50 * time.Millisecond)
-				}
+			// Break the paging loop if all videos on this page were too old
+			if done || pageOlder {
+				break
+			}
+			// If there is no next page token, stop paging this query
+			if searchRes.NextPageToken == "" {
+				break
+			}
+			// Otherwise set pageToken and optionally sleep between search pages
+			pageToken = searchRes.NextPageToken
+			if args.DelayMS > 0 {
+				time.Sleep(time.Duration(args.DelayMS) * time.Millisecond)
+			} else {
+				time.Sleep(50 * time.Millisecond)
 			}
 		}
-
-		// Update the state to reflect the latest ingestion time. We call
-		// UpdateYouTubeState which sets last_search_at and updated_at to now.
-		if err := store.UpdateYouTubeState(ctx, ticker); err != nil {
-			emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("state update: %v", err)})
-			return err
-		}
-
-		// Emit batch and job completion events. The records field counts
-		// videos only, not comment pages.
-		emitMeta("batch_committed", map[string]any{"records": processedVideos})
-		durationMs := time.Since(startTime).Milliseconds()
-		emitMeta("job_completed", map[string]any{"duration_ms": durationMs})
-		fmt.Printf("JOB_COMPLETED job_id=%s duration_ms=%d\n", jobID, durationMs)
-		fmt.Printf("PROCESSED job_id=%s videos=%d\n", jobID, processedVideos)
-		return nil
-
 	}
+
+	// At the end of the job (after all terms are processed), update the
+	// last_search_at state so subsequent runs only fetch newer videos.
+	if err := store.UpdateYouTubeState(ctx, ticker); err != nil {
+		emitMeta("job_failed", map[string]any{"reason": fmt.Sprintf("state update: %v", err)})
+		return err
+	}
+	// Emit batch commit and job completion events. processedVideos counts
+	// videos only; comment pages are not counted here.
+	emitMeta("batch_committed", map[string]any{"records": processedVideos})
+	durationMs := time.Since(startTime).Milliseconds()
+	emitMeta("job_completed", map[string]any{"duration_ms": durationMs})
+	fmt.Printf("JOB_COMPLETED job_id=%s duration_ms=%d\n", jobID, durationMs)
+	fmt.Printf("PROCESSED job_id=%s videos=%d\n", jobID, processedVideos)
 	return nil
 }
