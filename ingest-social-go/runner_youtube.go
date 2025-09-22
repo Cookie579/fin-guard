@@ -676,11 +676,18 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 	}
 
 	// --------- SEARCH LOOP (with early stop & uploads crawl) ---------
-	for _, term := range terms {
+	
+		// --- Top-up backfill to guarantee MaxVideos new items
+		mv := args.MaxVideos
+		if mv == 0 { mv = 10 }
+		attempts := 0
+		backfillBefore := ""
+		oldestAcross := time.Now().UTC()
+		for attempts < 8 && processedVideos < mv {
+for _, term := range terms {
 		if done {
 			break
 		}
-		backfillBefore := ""
 		pageToken := ""
 		for {
 			maxVideos := args.MaxVideos
@@ -796,6 +803,7 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 				pubAt := item.Snippet.PublishedAt
 				if t, err := time.Parse(time.RFC3339, pubAt); err == nil {
 					if t.Before(oldestSeen) { oldestSeen = t }
+					if t.Before(oldestAcross) { oldestAcross = t }
 				}
 				if cutoff > 0 {
 					if t, err := time.Parse(time.RFC3339, pubAt); err == nil {
@@ -819,30 +827,14 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 				}
 			}
 
-			if done {
-				break
-			}
-			if pageOlder {
-				mv := args.MaxVideos
-				if mv == 0 { mv = 10 }
-				if processedVideos < mv {
-					backfillBefore = oldestSeen.Add(-1 * time.Second).UTC().Format(time.RFC3339)
-					pageToken = ""
-					pageOlder = false
-					continue
-				}
+			if done || pageOlder {
 				break
 			}
 			if searchRes.NextPageToken == "" {
-				mv := args.MaxVideos
-				if mv == 0 { mv = 10 }
 				if processedVideos < mv {
-					if backfillBefore == "" {
-						backfillBefore = oldestSeen.Add(-1 * time.Second).UTC().Format(time.RFC3339)
-						pageToken = ""
-						continue
-					}
+					backfillBefore = oldestAcross.Add(-1 * time.Second).UTC().Format(time.RFC3339)
 				}
+
 				break
 			}
 			pageToken = searchRes.NextPageToken
@@ -854,7 +846,14 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 		}
 	}
 
-	// Final comment flush
+	
+			// end of terms range; prepare next backfill window if needed
+			attempts++
+			if processedVideos >= mv { break }
+			// step further back in time using oldestAcross
+			backfillBefore = oldestAcross.Add(-1 * time.Second).UTC().Format(time.RFC3339)
+		}
+// Final comment flush
 	if err := flushPendingComments(); err != nil {
 		emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("flush comments: %v", err)})
 		return err
