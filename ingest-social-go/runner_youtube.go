@@ -462,7 +462,7 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 		if errors.Is(err, ErrLockNotAcquired) {
 			return err
 		}
-		emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("lock: %v", err)})
+        emitMeta("job_failed", map[string]interface{}{"error": fmt.Sprintf("lock: %v", err)})
 		return err
 	}
 	fmt.Printf("LOCK_ACQUIRED job_id=%s pk=%s#%s\n", jobID, source, ticker)
@@ -508,13 +508,17 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 	terms := searchQueries(args.Ticker)
 	done := false
 
-	// comment batching
+    // comment batching
 	pendingCommentIDs := make([]string, 0, commentCountBatchSize)
 	pendingSet := make(map[string]struct{})
 
-	// channels discovered this run (to crawl uploads)
-	discoveredChannels := make([]string, 0, 32)
-	crawledChannel := make(map[string]struct{})
+    // uploads crawl disabled; no discoveredChannels or crawledChannel variables needed
+
+    // enableCutoff controls whether we skip videos older than the previous run's cutoff. When
+    // performing the initial search pass (backfillBefore == ""), it is true. When
+    // backfilling older videos (backfillBefore != ""), it is set to false so that older
+    // videos are not skipped. The value is updated at the start of each backfill attempt.
+    enableCutoff := true
 
 	flushPendingComments := func() error {
 		if len(pendingCommentIDs) == 0 {
@@ -561,12 +565,16 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 		if publishedAt != "" {
 			if tt, err := time.Parse(time.RFC3339, publishedAt); err == nil {
 				t = tt
-				if ts := t.Unix(); cutoff > 0 && ts <= cutoff {
-					return nil // too old
-				}
-				if ts := t.Unix(); ts > maxTimestamp {
-					maxTimestamp = ts
-				}
+                // decide whether to skip this video based on cutoff. Only skip when
+                // enableCutoff is true (i.e., not in backfill mode). During backfill
+                // attempts, enableCutoff is false so older videos are ingested too.
+                ts := t.Unix()
+                if enableCutoff && cutoff > 0 && ts <= cutoff {
+                    return nil // too old for new-results pass
+                }
+                if ts > maxTimestamp {
+                    maxTimestamp = ts
+                }
 			}
 		}
 
@@ -579,7 +587,7 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 		if !inserted {
 			return nil // previously processed
 		}
-		videoRec := map[string]any{
+        videoRec := map[string]interface{}{
 			"stage":         StageRaw,
 			"type":          "youtube_video",
 			"source":        source,
@@ -609,71 +617,7 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 		return nil
 	}
 
-	crawlUploadsForDiscoveredChannels := func() error {
-		if len(discoveredChannels) == 0 {
-			return nil
-		}
-		// pick up to maxUploadsChannelsPerRun channels not yet crawled
-		toCrawl := make([]string, 0, maxUploadsChannelsPerRun)
-		for _, ch := range discoveredChannels {
-			if len(toCrawl) >= maxUploadsChannelsPerRun {
-				break
-			}
-			if _, done := crawledChannel[ch]; done {
-				continue
-			}
-			toCrawl = append(toCrawl, ch)
-		}
-		if len(toCrawl) == 0 {
-			return nil
-		}
-		// resolve uploads playlists
-		upMap, err := getUploadsPlaylistIDs(ctx, client, apiKey, toCrawl)
-		if err != nil {
-			return err
-		}
-		for _, ch := range toCrawl {
-			pl, ok := upMap[ch]
-			if !ok || pl == "" {
-				crawledChannel[ch] = struct{}{}
-				continue
-			}
-			items, err := listPlaylistItems(ctx, client, apiKey, pl, cutoff, maxUploadsPagesPerChannel)
-			if err != nil {
-				return err
-			}
-			for _, it := range items {
-				if done {
-					break
-				}
-				// Respect MaxVideos
-				maxVideos := args.MaxVideos
-				if maxVideos == 0 {
-					maxVideos = 10
-				}
-				if processedVideos >= maxVideos {
-					done = true
-					break
-				}
-				_ = ingestVideo(it.VideoID, it.PublishedAt, it.Title, it.Description, it.ChannelID, it.ChannelTitle, "channel_uploads")
-				// pacing
-				if args.DelayMS > 0 {
-					time.Sleep(time.Duration(args.DelayMS) * time.Millisecond)
-				} else {
-					time.Sleep(25 * time.Millisecond)
-				}
-			}
-			crawledChannel[ch] = struct{}{}
-			// Flush comments in batches as we go
-			if err := flushPendingComments(); err != nil {
-				return err
-			}
-			if done {
-				break
-			}
-		}
-		return nil
-	}
+    // Removed crawlUploadsForDiscoveredChannels; we no longer crawl channel uploads for top-up
 
 	// --------- SEARCH LOOP (with early stop & uploads crawl) ---------
 
@@ -683,9 +627,19 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 		mv = 10
 	}
 	attempts := 0
-	backfillBefore := ""
-	oldestAcross := time.Now().UTC()
-	for attempts < 8 && processedVideos < mv {
+    backfillBefore := ""
+    // will hold the oldest PublishedAt seen during this attempt
+    var oldestAcross time.Time
+    for attempts < 8 && processedVideos < mv {
+        // reset oldestAcross at the start of each attempt
+        oldestAcross = time.Now().UTC()
+        // update enableCutoff: if backfillBefore is empty, skip older videos (new-pass)
+        // otherwise, we're in backfill mode so ingest older videos too
+        if backfillBefore != "" {
+            enableCutoff = false
+        } else {
+            enableCutoff = true
+        }
 		for _, term := range terms {
 			if done {
 				break
@@ -702,14 +656,14 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 				}
 				select {
 				case <-ctx.Done():
-					emitMeta("job_failed", map[string]any{"error": "terminated"})
+                    emitMeta("job_failed", map[string]interface{}{"error": "terminated"})
 					return fmt.Errorf("terminated")
 				default:
 				}
 
 				lease, err := acquirePermit(ctx, "youtube")
 				if err != nil {
-					emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("broker acquire: %v", err)})
+                    emitMeta("job_failed", map[string]interface{}{"error": fmt.Sprintf("broker acquire: %v", err)})
 					return err
 				}
 
@@ -747,12 +701,12 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 				ok := (doErr == nil && status == http.StatusOK)
 				reportResult(ctx, lease.ID, ok, status, retryAfterMs)
 				if doErr != nil {
-					emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("HTTP error: %v", doErr)})
+                    emitMeta("job_failed", map[string]interface{}{"error": fmt.Sprintf("HTTP error: %v", doErr)})
 					return doErr
 				}
 				if status != http.StatusOK {
 					err := fmt.Errorf("HTTP %d: %s", status, string(body))
-					emitMeta("job_failed", map[string]any{"error": err.Error()})
+                    emitMeta("job_failed", map[string]interface{}{"error": err.Error()})
 					return err
 				}
 
@@ -772,7 +726,7 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 					} `json:"items"`
 				}
 				if err := json.Unmarshal(body, &searchRes); err != nil {
-					emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("unmarshal: %v", err)})
+                    emitMeta("job_failed", map[string]interface{}{"error": fmt.Sprintf("unmarshal: %v", err)})
 					return err
 				}
 				if len(searchRes.Items) == 0 {
@@ -797,10 +751,7 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 					if vid == "" {
 						continue
 					}
-					// collect channel for uploads crawl
-					if item.Snippet.ChannelID != "" {
-						discoveredChannels = append(discoveredChannels, item.Snippet.ChannelID)
-					}
+                    // no need to collect channel IDs for uploads since uploads crawl is disabled
 					// Try ingest
 					pubAt := item.Snippet.PublishedAt
 					if t, err := time.Parse(time.RFC3339, pubAt); err == nil {
@@ -811,27 +762,25 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 							oldestAcross = t
 						}
 					}
-					if cutoff > 0 {
-						if t, err := time.Parse(time.RFC3339, pubAt); err == nil {
-							if t.Unix() <= cutoff {
-								pageOlder = true
-								continue
-							}
-						}
-					}
+                    // Only treat pages containing older-than-cutoff videos as a signal to stop
+                    // when enableCutoff is true (i.e., during the initial search pass). In
+                    // backfill mode (enableCutoff == false), we intentionally allow older
+                    // videos to be ingested, so we do not set pageOlder.
+                    if enableCutoff && cutoff > 0 {
+                        if t, err := time.Parse(time.RFC3339, pubAt); err == nil {
+                            if t.Unix() <= cutoff {
+                                pageOlder = true
+                                continue
+                            }
+                        }
+                    }
 					if err := ingestVideo(vid, pubAt, item.Snippet.Title, item.Snippet.Description, item.Snippet.ChannelID, item.Snippet.ChannelTitle, term); err != nil {
-						emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("ingest: %v", err)})
+                        emitMeta("job_failed", map[string]interface{}{"error": fmt.Sprintf("ingest: %v", err)})
 						return err
 					}
 				}
 
-				// opportunistic uploads crawl to boost yield (cheap API units)
-				if !done {
-					if err := crawlUploadsForDiscoveredChannels(); err != nil {
-						emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("uploads crawl: %v", err)})
-						return err
-					}
-				}
+                // Note: uploads crawl removed; instead rely solely on search results and backfill
 
 				if done || pageOlder {
 					break
@@ -861,10 +810,10 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 	}
 
 	// Final comment flush
-	if err := flushPendingComments(); err != nil {
-		emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("flush comments: %v", err)})
-		return err
-	}
+    if err := flushPendingComments(); err != nil {
+        emitMeta("job_failed", map[string]interface{}{"error": fmt.Sprintf("flush comments: %v", err)})
+        return err
+    }
 
 	// Update state: if we ingested any video newer than previous cutoff,
 	// advance last_search_at to that timestamp. Otherwise, do not advance it.
@@ -876,15 +825,15 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 		stateTs = nil // no advance; only bump updated_at
 	}
 
-	if err := store.UpdateYouTubeStateAt(ctx, ticker, stateTs); err != nil {
-		emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("state update: %v", err)})
-		return err
-	}
+    if err := store.UpdateYouTubeStateAt(ctx, ticker, stateTs); err != nil {
+        emitMeta("job_failed", map[string]interface{}{"error": fmt.Sprintf("state update: %v", err)})
+        return err
+    }
 
-	emitMeta("batch_committed", map[string]any{"records": processedVideos})
+    emitMeta("batch_committed", map[string]interface{}{"records": processedVideos})
 
 	durationMs := time.Since(startTime).Milliseconds()
-	emitMeta("job_completed", map[string]any{"duration_ms": durationMs})
+    emitMeta("job_completed", map[string]interface{}{"duration_ms": durationMs})
 	fmt.Printf("JOB_COMPLETED job_id=%s duration_ms=%d\n", jobID, durationMs)
 	fmt.Printf("PROCESSED job_id=%s videos=%d\n", jobID, processedVideos)
 	return nil
