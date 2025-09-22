@@ -680,6 +680,7 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 		if done {
 			break
 		}
+		backfillBefore := ""
 		pageToken := ""
 		for {
 			maxVideos := args.MaxVideos
@@ -713,7 +714,9 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 			if pageToken != "" {
 				q.Set("pageToken", pageToken)
 			}
-			if cutoff > 0 {
+			if backfillBefore != "" {
+				q.Set("publishedBefore", backfillBefore)
+			} else if cutoff > 0 {
 				q.Set("publishedAfter", time.Unix(cutoff, 0).UTC().Format(time.RFC3339))
 			}
 			q.Set("key", apiKey)
@@ -768,6 +771,7 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 			}
 
 			pageOlder := false
+			oldestSeen := time.Now().UTC()
 			for _, item := range searchRes.Items {
 				if done {
 					break
@@ -790,6 +794,9 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 				}
 				// Try ingest
 				pubAt := item.Snippet.PublishedAt
+				if t, err := time.Parse(time.RFC3339, pubAt); err == nil {
+					if t.Before(oldestSeen) { oldestSeen = t }
+				}
 				if cutoff > 0 {
 					if t, err := time.Parse(time.RFC3339, pubAt); err == nil {
 						if t.Unix() <= cutoff {
@@ -812,10 +819,30 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 				}
 			}
 
-			if done || pageOlder {
+			if done {
+				break
+			}
+			if pageOlder {
+				mv := args.MaxVideos
+				if mv == 0 { mv = 10 }
+				if processedVideos < mv {
+					backfillBefore = oldestSeen.Add(-1 * time.Second).UTC().Format(time.RFC3339)
+					pageToken = ""
+					pageOlder = false
+					continue
+				}
 				break
 			}
 			if searchRes.NextPageToken == "" {
+				mv := args.MaxVideos
+				if mv == 0 { mv = 10 }
+				if processedVideos < mv {
+					if backfillBefore == "" {
+						backfillBefore = oldestSeen.Add(-1 * time.Second).UTC().Format(time.RFC3339)
+						pageToken = ""
+						continue
+					}
+				}
 				break
 			}
 			pageToken = searchRes.NextPageToken
