@@ -119,7 +119,7 @@ func fetchVideoCommentCounts(ctx context.Context, client *http.Client, apiKey st
 			ID         string `json:"id"`
 			Statistics struct {
 				CommentCount string `json:"commentCount"`
-                LikeCount    string `json:"likeCount"`
+				LikeCount    string `json:"likeCount"`
 			} `json:"statistics"`
 		} `json:"items"`
 	}
@@ -384,7 +384,7 @@ func harvestCommentsForVideo(ctx context.Context, client *http.Client, apiKey, s
 		_ = json.Unmarshal(cBody, &cRespObj)
 		for _, it := range cRespObj.Items {
 			c := it.Snippet.TopLevelComment
-			rec := map[string]any{
+            rec := map[string]interface{}{
 				"stage":           StageRaw,
 				"type":            "youtube_comment",
 				"source":          source,
@@ -440,8 +440,8 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 	}
 	defer func() { _ = pub.Close(ctx) }()
 
-	emitMeta := func(eventType string, extra map[string]any) {
-		rec := map[string]any{
+    emitMeta := func(eventType string, extra map[string]interface{}) {
+            rec := map[string]interface{}{
 			"stage":  StageEvents,
 			"type":   eventType,
 			"source": source,
@@ -453,10 +453,10 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 			rec[k] = v
 		}
 		rowKey := fmt.Sprintf("meta:%s", eventType)
-		_ = pub.AddRecord(source, ticker, rowKey, rec)
+        _ = pub.AddRecord(source, ticker, rowKey, rec)
 	}
 
-	emitMeta("job_started", map[string]any{})
+    emitMeta("job_started", map[string]interface{}{})
 
 	if err := store.AcquireLock(ctx, source, ticker, ownerID, jobID); err != nil {
 		if errors.Is(err, ErrLockNotAcquired) {
@@ -485,13 +485,13 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 
 	apiKey, err := getYouTubeAPIKey()
 	if err != nil {
-		emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("missing YouTube API key: %v", err)})
+        emitMeta("job_failed", map[string]interface{}{"error": fmt.Sprintf("missing YouTube API key: %v", err)})
 		return err
 	}
 
 	lastSearchAt, err := store.GetYouTubeState(ctx, ticker)
 	if err != nil {
-		emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("state load: %v", err)})
+        emitMeta("job_failed", map[string]interface{}{"error": fmt.Sprintf("state load: %v", err)})
 		return err
 	}
 	var cutoff int64
@@ -576,9 +576,10 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 		if err != nil {
 			return err
 		}
-		if !inserted { return nil // previously processed }
-				newThisPage++
-			videoRec := map[string]any{
+		if !inserted {
+			return nil // previously processed
+		}
+		videoRec := map[string]any{
 			"stage":         StageRaw,
 			"type":          "youtube_video",
 			"source":        source,
@@ -675,113 +676,22 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 	}
 
 	// --------- SEARCH LOOP (with early stop & uploads crawl) ---------
-	
-		// --- Top-up backfill to guarantee MaxVideos new items
-		mv := args.MaxVideos
-		if mv == 0 { mv = 10 }
-		attempts := 0
-		backfillBefore := ""
-		oldestAcross := time.Now().UTC()
-		for attempts < 8 && processedVideos < mv {
-for _, term := range terms {
-		if done {
-			break
-		}
-		pageToken := ""
-		for {
-			maxVideos := args.MaxVideos
-			if maxVideos == 0 {
-				maxVideos = 10
-			}
-			if processedVideos >= maxVideos {
-				done = true
+
+	// --- Top-up backfill to guarantee MaxVideos new items
+	mv := args.MaxVideos
+	if mv == 0 {
+		mv = 10
+	}
+	attempts := 0
+	backfillBefore := ""
+	oldestAcross := time.Now().UTC()
+	for attempts < 8 && processedVideos < mv {
+		for _, term := range terms {
+			if done {
 				break
 			}
-			select {
-			case <-ctx.Done():
-				emitMeta("job_failed", map[string]any{"error": "terminated"})
-				return fmt.Errorf("terminated")
-			default:
-			}
-
-			lease, err := acquirePermit(ctx, "youtube")
-			if err != nil {
-				emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("broker acquire: %v", err)})
-				return err
-			}
-
-			q := url.Values{}
-			q.Set("q", term)
-			q.Set("part", "id,snippet")
-			q.Set("type", "video")
-			q.Set("order", "date")
-			q.Set("maxResults", "50")
-			q.Set("relevanceLanguage", "en")
-			if pageToken != "" {
-				q.Set("pageToken", pageToken)
-			}
-			if backfillBefore != "" {
-				q.Set("publishedBefore", backfillBefore)
-			} else if cutoff > 0 {
-				q.Set("publishedAfter", time.Unix(cutoff, 0).UTC().Format(time.RFC3339))
-			}
-			q.Set("key", apiKey)
-			reqURL := "https://www.googleapis.com/youtube/v3/search?" + q.Encode()
-			req, _ := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-			req.Header.Set("User-Agent", "ingest-social-go/1.0")
-
-			var status int
-			var retryAfterMs int
-			var body []byte
-			resp, doErr := client.Do(req)
-			if resp != nil {
-				status = resp.StatusCode
-				retryAfterMs = parseRetryAfterMs(resp.Header.Get("Retry-After"), time.Now())
-				b, _ := io.ReadAll(resp.Body)
-				resp.Body.Close()
-				body = b
-			}
-			ok := (doErr == nil && status == http.StatusOK)
-			reportResult(ctx, lease.ID, ok, status, retryAfterMs)
-			if doErr != nil {
-				emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("HTTP error: %v", doErr)})
-				return doErr
-			}
-			if status != http.StatusOK {
-				err := fmt.Errorf("HTTP %d: %s", status, string(body))
-				emitMeta("job_failed", map[string]any{"error": err.Error()})
-				return err
-			}
-
-			var searchRes struct {
-				NextPageToken string `json:"nextPageToken"`
-				Items         []struct {
-					ID struct {
-						VideoID string `json:"videoId"`
-					} `json:"id"`
-					Snippet struct {
-						PublishedAt  string `json:"publishedAt"`
-						Title        string `json:"title"`
-						Description  string `json:"description"`
-						ChannelID    string `json:"channelId"`
-						ChannelTitle string `json:"channelTitle"`
-					} `json:"snippet"`
-				} `json:"items"`
-			}
-			if err := json.Unmarshal(body, &searchRes); err != nil {
-				emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("unmarshal: %v", err)})
-				return err
-			}
-			if len(searchRes.Items) == 0 {
-				break
-			}
-
-			pageOlder := false
-			oldestSeen := time.Now().UTC()
-			for _, item := range searchRes.Items {
-				if done {
-					break
-				}
+			pageToken := ""
+			for {
 				maxVideos := args.MaxVideos
 				if maxVideos == 0 {
 					maxVideos = 10
@@ -790,88 +700,189 @@ for _, term := range terms {
 					done = true
 					break
 				}
-				vid := item.ID.VideoID
-				if vid == "" {
-					continue
+				select {
+				case <-ctx.Done():
+					emitMeta("job_failed", map[string]any{"error": "terminated"})
+					return fmt.Errorf("terminated")
+				default:
 				}
-				// collect channel for uploads crawl
-				if item.Snippet.ChannelID != "" {
-					discoveredChannels = append(discoveredChannels, item.Snippet.ChannelID)
+
+				lease, err := acquirePermit(ctx, "youtube")
+				if err != nil {
+					emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("broker acquire: %v", err)})
+					return err
 				}
-				// Try ingest
-				pubAt := item.Snippet.PublishedAt
-				if t, err := time.Parse(time.RFC3339, pubAt); err == nil {
-					if t.Before(oldestSeen) { oldestSeen = t }
-					if t.Before(oldestAcross) { oldestAcross = t }
+
+				q := url.Values{}
+				q.Set("q", term)
+				q.Set("part", "id,snippet")
+				q.Set("type", "video")
+				q.Set("order", "date")
+				q.Set("maxResults", "50")
+				q.Set("relevanceLanguage", "en")
+				if pageToken != "" {
+					q.Set("pageToken", pageToken)
 				}
-				if cutoff > 0 {
+				if backfillBefore != "" {
+					q.Set("publishedBefore", backfillBefore)
+				} else if cutoff > 0 {
+					q.Set("publishedAfter", time.Unix(cutoff, 0).UTC().Format(time.RFC3339))
+				}
+				q.Set("key", apiKey)
+				reqURL := "https://www.googleapis.com/youtube/v3/search?" + q.Encode()
+				req, _ := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+				req.Header.Set("User-Agent", "ingest-social-go/1.0")
+
+				var status int
+				var retryAfterMs int
+				var body []byte
+				resp, doErr := client.Do(req)
+				if resp != nil {
+					status = resp.StatusCode
+					retryAfterMs = parseRetryAfterMs(resp.Header.Get("Retry-After"), time.Now())
+					b, _ := io.ReadAll(resp.Body)
+					resp.Body.Close()
+					body = b
+				}
+				ok := (doErr == nil && status == http.StatusOK)
+				reportResult(ctx, lease.ID, ok, status, retryAfterMs)
+				if doErr != nil {
+					emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("HTTP error: %v", doErr)})
+					return doErr
+				}
+				if status != http.StatusOK {
+					err := fmt.Errorf("HTTP %d: %s", status, string(body))
+					emitMeta("job_failed", map[string]any{"error": err.Error()})
+					return err
+				}
+
+				var searchRes struct {
+					NextPageToken string `json:"nextPageToken"`
+					Items         []struct {
+						ID struct {
+							VideoID string `json:"videoId"`
+						} `json:"id"`
+						Snippet struct {
+							PublishedAt  string `json:"publishedAt"`
+							Title        string `json:"title"`
+							Description  string `json:"description"`
+							ChannelID    string `json:"channelId"`
+							ChannelTitle string `json:"channelTitle"`
+						} `json:"snippet"`
+					} `json:"items"`
+				}
+				if err := json.Unmarshal(body, &searchRes); err != nil {
+					emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("unmarshal: %v", err)})
+					return err
+				}
+				if len(searchRes.Items) == 0 {
+					break
+				}
+
+				pageOlder := false
+				oldestSeen := time.Now().UTC()
+				for _, item := range searchRes.Items {
+					if done {
+						break
+					}
+					maxVideos := args.MaxVideos
+					if maxVideos == 0 {
+						maxVideos = 10
+					}
+					if processedVideos >= maxVideos {
+						done = true
+						break
+					}
+					vid := item.ID.VideoID
+					if vid == "" {
+						continue
+					}
+					// collect channel for uploads crawl
+					if item.Snippet.ChannelID != "" {
+						discoveredChannels = append(discoveredChannels, item.Snippet.ChannelID)
+					}
+					// Try ingest
+					pubAt := item.Snippet.PublishedAt
 					if t, err := time.Parse(time.RFC3339, pubAt); err == nil {
-						if t.Unix() <= cutoff {
-							pageOlder = true
-							continue
+						if t.Before(oldestSeen) {
+							oldestSeen = t
+						}
+						if t.Before(oldestAcross) {
+							oldestAcross = t
 						}
 					}
-				}
-				if err := ingestVideo(vid, pubAt, item.Snippet.Title, item.Snippet.Description, item.Snippet.ChannelID, item.Snippet.ChannelTitle, term); err != nil {
-					emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("ingest: %v", err)})
-					return err
-				}
-			}
-
-			// opportunistic uploads crawl to boost yield (cheap API units)
-			if !done {
-				if err := crawlUploadsForDiscoveredChannels(); err != nil {
-					emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("uploads crawl: %v", err)})
-					return err
-				}
-			}
-
-			if done || pageOlder {
-				break
-			}
-			if searchRes.NextPageToken == "" {
-				if processedVideos < mv {
-					backfillBefore = oldestAcross.Add(-1 * time.Second).UTC().Format(time.RFC3339)
+					if cutoff > 0 {
+						if t, err := time.Parse(time.RFC3339, pubAt); err == nil {
+							if t.Unix() <= cutoff {
+								pageOlder = true
+								continue
+							}
+						}
+					}
+					if err := ingestVideo(vid, pubAt, item.Snippet.Title, item.Snippet.Description, item.Snippet.ChannelID, item.Snippet.ChannelTitle, term); err != nil {
+						emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("ingest: %v", err)})
+						return err
+					}
 				}
 
-				break
-			}
-			pageToken = searchRes.NextPageToken
-			if args.DelayMS > 0 {
-				time.Sleep(time.Duration(args.DelayMS) * time.Millisecond)
-			} else {
-				time.Sleep(50 * time.Millisecond)
+				// opportunistic uploads crawl to boost yield (cheap API units)
+				if !done {
+					if err := crawlUploadsForDiscoveredChannels(); err != nil {
+						emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("uploads crawl: %v", err)})
+						return err
+					}
+				}
+
+				if done || pageOlder {
+					break
+				}
+				if searchRes.NextPageToken == "" {
+					if processedVideos < mv {
+						backfillBefore = oldestAcross.Add(-1 * time.Second).UTC().Format(time.RFC3339)
+					}
+					break
+				}
+				pageToken = searchRes.NextPageToken
+				if args.DelayMS > 0 {
+					time.Sleep(time.Duration(args.DelayMS) * time.Millisecond)
+				} else {
+					time.Sleep(50 * time.Millisecond)
+				}
 			}
 		}
+
+		// end of terms range; prepare next backfill window if needed
+		attempts++
+		if processedVideos >= mv {
+			break
+		}
+		// step further back in time using oldestAcross
+		backfillBefore = oldestAcross.Add(-1 * time.Second).UTC().Format(time.RFC3339)
 	}
 
-	
-			// end of terms range; prepare next backfill window if needed
-			attempts++
-			if processedVideos >= mv { break }
-			// step further back in time using oldestAcross
-			backfillBefore = oldestAcross.Add(-1 * time.Second).UTC().Format(time.RFC3339)
-		}
-// Final comment flush
+	// Final comment flush
 	if err := flushPendingComments(); err != nil {
 		emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("flush comments: %v", err)})
 		return err
 	}
 
-	
-// Update state: if we ingested any video newer than previous cutoff, advance last_search_at to that timestamp.
-var stateTs *time.Time
-if maxTimestamp > cutoff {
-    t := time.Unix(maxTimestamp, 0).UTC()
-    stateTs = &t
-} else {
-    stateTs = nil // no advance; only bump updated_at
-}
-if err := store.UpdateYouTubeStateAt(ctx, ticker, stateTs); err != nil {
-    emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("state update: %v", err)})
-    return err
-}
-emitMeta("batch_committed", map[string]any{"records": processedVideos})
+	// Update state: if we ingested any video newer than previous cutoff,
+	// advance last_search_at to that timestamp. Otherwise, do not advance it.
+	var stateTs *time.Time
+	if maxTimestamp > cutoff {
+		t := time.Unix(maxTimestamp, 0).UTC()
+		stateTs = &t
+	} else {
+		stateTs = nil // no advance; only bump updated_at
+	}
+
+	if err := store.UpdateYouTubeStateAt(ctx, ticker, stateTs); err != nil {
+		emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("state update: %v", err)})
+		return err
+	}
+
+	emitMeta("batch_committed", map[string]any{"records": processedVideos})
+
 	durationMs := time.Since(startTime).Milliseconds()
 	emitMeta("job_completed", map[string]any{"duration_ms": durationMs})
 	fmt.Printf("JOB_COMPLETED job_id=%s duration_ms=%d\n", jobID, durationMs)
