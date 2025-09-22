@@ -576,10 +576,9 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 		if err != nil {
 			return err
 		}
-		if !inserted {
-			return nil // previously processed
-		}
-		videoRec := map[string]any{
+		if !inserted { return nil // previously processed }
+				newThisPage++
+			videoRec := map[string]any{
 			"stage":         StageRaw,
 			"type":          "youtube_video",
 			"source":        source,
@@ -859,11 +858,20 @@ for _, term := range terms {
 		return err
 	}
 
-	if err := store.UpdateYouTubeState(ctx, ticker); err != nil {
-		emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("state update: %v", err)})
-		return err
-	}
-	emitMeta("batch_committed", map[string]any{"records": processedVideos})
+	
+// Update state: if we ingested any video newer than previous cutoff, advance last_search_at to that timestamp.
+var stateTs *time.Time
+if maxTimestamp > cutoff {
+    t := time.Unix(maxTimestamp, 0).UTC()
+    stateTs = &t
+} else {
+    stateTs = nil // no advance; only bump updated_at
+}
+if err := store.UpdateYouTubeStateAt(ctx, ticker, stateTs); err != nil {
+    emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("state update: %v", err)})
+    return err
+}
+emitMeta("batch_committed", map[string]any{"records": processedVideos})
 	durationMs := time.Since(startTime).Milliseconds()
 	emitMeta("job_completed", map[string]any{"duration_ms": durationMs})
 	fmt.Printf("JOB_COMPLETED job_id=%s duration_ms=%d\n", jobID, durationMs)

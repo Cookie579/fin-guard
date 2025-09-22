@@ -288,3 +288,43 @@ func (s *DynamoStore) InsertYouTubeVideoID(ctx context.Context, ticker string, y
 	}
 	return true, nil
 }
+
+
+
+// UpdateYouTubeStateAt sets updated_at and optionally last_search_at to a specific timestamp.
+// If ts is nil, only updated_at is modified (useful when no new videos were ingested).
+func (s *DynamoStore) UpdateYouTubeStateAt(ctx context.Context, ticker string, ts *time.Time) error {
+    pk := fmt.Sprintf("youtube#%s", strings.ToUpper(ticker))
+    now := time.Now().UTC().Format(time.RFC3339)
+    if ts != nil {
+        at := ts.UTC().Format(time.RFC3339)
+        input := &dynamodb.UpdateItemInput{
+            TableName: aws.String(DdbStateTable),
+            Key: map[string]types.AttributeValue{
+                "pk": &types.AttributeValueMemberS{Value: pk},
+            },
+            UpdateExpression: aws.String("SET last_search_at = :at, updated_at = :now"),
+            ExpressionAttributeValues: map[string]types.AttributeValue{
+                ":at":  &types.AttributeValueMemberS{Value: at},
+                ":now": &types.AttributeValueMemberS{Value: now},
+            },
+            ReturnValues: types.ReturnValueNone,
+        }
+        _, err := s.client.UpdateItem(ctx, input)
+        return err
+    }
+    // only bump updated_at
+    input := &dynamodb.UpdateItemInput{
+        TableName: aws.String(DdbStateTable),
+        Key: map[string]types.AttributeValue{
+            "pk": &types.AttributeValueMemberS{Value: pk},
+        },
+        UpdateExpression: aws.String("SET updated_at = :now"),
+        ExpressionAttributeValues: map[string]types.AttributeValue{
+            ":now": &types.AttributeValueMemberS{Value: now},
+        },
+        ReturnValues: types.ReturnValueNone,
+    }
+    _, err := s.client.UpdateItem(ctx, input)
+    return err
+}
