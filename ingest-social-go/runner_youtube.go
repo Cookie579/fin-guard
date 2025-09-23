@@ -18,8 +18,6 @@ import (
 
 // ---- Tunables (safe defaults) ----
 const (
-	// How many distinct channels (max) to crawl via uploads playlists per run.
-	maxUploadsChannelsPerRun = 6
 	// How many pages of playlistItems to fetch per channel (50 videos/page).
 	maxUploadsPagesPerChannel = 1
 	// Batch size for checking comment counts via videos.list before harvesting.
@@ -384,7 +382,7 @@ func harvestCommentsForVideo(ctx context.Context, client *http.Client, apiKey, s
 		_ = json.Unmarshal(cBody, &cRespObj)
 		for _, it := range cRespObj.Items {
 			c := it.Snippet.TopLevelComment
-            rec := map[string]interface{}{
+			rec := map[string]interface{}{
 				"stage":           StageRaw,
 				"type":            "youtube_comment",
 				"source":          source,
@@ -440,8 +438,8 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 	}
 	defer func() { _ = pub.Close(ctx) }()
 
-    emitMeta := func(eventType string, extra map[string]interface{}) {
-            rec := map[string]interface{}{
+	emitMeta := func(eventType string, extra map[string]interface{}) {
+		rec := map[string]interface{}{
 			"stage":  StageEvents,
 			"type":   eventType,
 			"source": source,
@@ -453,16 +451,16 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 			rec[k] = v
 		}
 		rowKey := fmt.Sprintf("meta:%s", eventType)
-        _ = pub.AddRecord(source, ticker, rowKey, rec)
+		_ = pub.AddRecord(source, ticker, rowKey, rec)
 	}
 
-    emitMeta("job_started", map[string]interface{}{})
+	emitMeta("job_started", map[string]interface{}{})
 
 	if err := store.AcquireLock(ctx, source, ticker, ownerID, jobID); err != nil {
 		if errors.Is(err, ErrLockNotAcquired) {
 			return err
 		}
-        emitMeta("job_failed", map[string]interface{}{"error": fmt.Sprintf("lock: %v", err)})
+		emitMeta("job_failed", map[string]interface{}{"error": fmt.Sprintf("lock: %v", err)})
 		return err
 	}
 	fmt.Printf("LOCK_ACQUIRED job_id=%s pk=%s#%s\n", jobID, source, ticker)
@@ -485,13 +483,13 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 
 	apiKey, err := getYouTubeAPIKey()
 	if err != nil {
-        emitMeta("job_failed", map[string]interface{}{"error": fmt.Sprintf("missing YouTube API key: %v", err)})
+		emitMeta("job_failed", map[string]interface{}{"error": fmt.Sprintf("missing YouTube API key: %v", err)})
 		return err
 	}
 
 	lastSearchAt, err := store.GetYouTubeState(ctx, ticker)
 	if err != nil {
-        emitMeta("job_failed", map[string]interface{}{"error": fmt.Sprintf("state load: %v", err)})
+		emitMeta("job_failed", map[string]interface{}{"error": fmt.Sprintf("state load: %v", err)})
 		return err
 	}
 	var cutoff int64
@@ -500,451 +498,451 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 	}
 	var maxTimestamp int64 = cutoff
 
-    // Initialize counters, HTTP client, and search terms
-    processedVideos := 0
-    startTime := time.Now()
-    client := &http.Client{Timeout: 45 * time.Second}
+	// Initialize counters, HTTP client, and search terms
+	processedVideos := 0
+	startTime := time.Now()
+	client := &http.Client{Timeout: 45 * time.Second}
 
-    // Track videos we've already seen this run to avoid duplicates
-    seen := make(map[string]struct{})
-    terms := searchQueries(args.Ticker)
+	// Track videos we've already seen this run to avoid duplicates
+	seen := make(map[string]struct{})
+	terms := searchQueries(args.Ticker)
 
-    // Comment batching structures
-    pendingCommentIDs := make([]string, 0, commentCountBatchSize)
-    pendingSet := make(map[string]struct{})
+	// Comment batching structures
+	pendingCommentIDs := make([]string, 0, commentCountBatchSize)
+	pendingSet := make(map[string]struct{})
 
-    // enableCutoff controls whether we skip videos older than the previous run's cutoff. When
-    // performing the initial search pass (backfillBefore == ""), it is true. When
-    // backfilling older videos (backfillBefore != ""), it is set to false so that older
-    // videos are not skipped. The value is updated at the start of each backfill attempt.
-    enableCutoff := true
+	// enableCutoff controls whether we skip videos older than the previous run's cutoff. When
+	// performing the initial search pass (backfillBefore == ""), it is true. When
+	// backfilling older videos (backfillBefore != ""), it is set to false so that older
+	// videos are not skipped. The value is updated at the start of each backfill attempt.
+	enableCutoff := true
 
-    // Helper to flush pending comment video IDs by checking their comment counts and
-    // harvesting comments when non-zero.
-    flushPendingComments := func() error {
-        if len(pendingCommentIDs) == 0 {
-            return nil
-        }
-        for i := 0; i < len(pendingCommentIDs); i += commentCountBatchSize {
-            batch := pendingCommentIDs[i:minInt(i+commentCountBatchSize, len(pendingCommentIDs))]
-            counts, err := fetchVideoCommentCounts(ctx, client, apiKey, batch)
-            if err != nil {
-                return err
-            }
-            for _, vid := range batch {
-                if counts[vid] == 0 {
-                    continue
-                }
-                if err := harvestCommentsForVideo(ctx, client, apiKey, source, ticker, ingestDate, jobID, vid, args, pub); err != nil {
-                    return err
-                }
-                // pacing
-                if args.DelayMS > 0 {
-                    time.Sleep(time.Duration(args.DelayMS) * time.Millisecond)
-                } else {
-                    time.Sleep(25 * time.Millisecond)
-                }
-            }
-        }
-        // reset
-        pendingCommentIDs = pendingCommentIDs[:0]
-        pendingSet = make(map[string]struct{})
-        return nil
-    }
+	// Helper to flush pending comment video IDs by checking their comment counts and
+	// harvesting comments when non-zero.
+	flushPendingComments := func() error {
+		if len(pendingCommentIDs) == 0 {
+			return nil
+		}
+		for i := 0; i < len(pendingCommentIDs); i += commentCountBatchSize {
+			batch := pendingCommentIDs[i:minInt(i+commentCountBatchSize, len(pendingCommentIDs))]
+			counts, err := fetchVideoCommentCounts(ctx, client, apiKey, batch)
+			if err != nil {
+				return err
+			}
+			for _, vid := range batch {
+				if counts[vid] == 0 {
+					continue
+				}
+				if err := harvestCommentsForVideo(ctx, client, apiKey, source, ticker, ingestDate, jobID, vid, args, pub); err != nil {
+					return err
+				}
+				// pacing
+				if args.DelayMS > 0 {
+					time.Sleep(time.Duration(args.DelayMS) * time.Millisecond)
+				} else {
+					time.Sleep(25 * time.Millisecond)
+				}
+			}
+		}
+		// reset
+		pendingCommentIDs = pendingCommentIDs[:0]
+		pendingSet = make(map[string]struct{})
+		return nil
+	}
 
-    // Helper to ingest a single video record. This respects cutoff based on enableCutoff
-    // and updates state/queues accordingly.
-    ingestVideo := func(vid, publishedAt, title, desc, channelID, channelTitle, searchTerm string) error {
-        if vid == "" {
-            return nil
-        }
-        if _, ok := seen[vid]; ok {
-            return nil
-        }
-        // parse publishedAt if available for cutoff & year
-        var t time.Time
-        if publishedAt != "" {
-            if tt, err := time.Parse(time.RFC3339, publishedAt); err == nil {
-                t = tt
-                ts := t.Unix()
-                // skip older videos when enableCutoff is true
-                if enableCutoff && cutoff > 0 && ts <= cutoff {
-                    return nil
-                }
-                if ts > maxTimestamp {
-                    maxTimestamp = ts
-                }
-            }
-        }
-        seen[vid] = struct{}{}
-        year := t.UTC().Year()
-        inserted, err := store.InsertYouTubeVideoID(ctx, ticker, year, vid, time.Now().UTC(), &t, channelID, jobID)
-        if err != nil {
-            return err
-        }
-        if !inserted {
-            return nil
-        }
-        videoRec := map[string]interface{}{
-            "stage":         StageRaw,
-            "type":          "youtube_video",
-            "source":        source,
-            "ticker":        ticker,
-            "ingest_date":   ingestDate,
-            "job_id":        jobID,
-            "video_id":      vid,
-            "published_at":  publishedAt,
-            "title":         title,
-            "description":   cleanYTText(desc),
-            "channel_id":    channelID,
-            "channel_title": channelTitle,
-            "search_term":   searchTerm,
-        }
-        videoRowKey := "vid:" + vid
-        if err := pub.AddRecord(source, ticker, videoRowKey, videoRec); err != nil {
-            return err
-        }
-        // queue for comment harvesting (batched)
-        if _, exists := pendingSet[vid]; !exists {
-            pendingSet[vid] = struct{}{}
-            pendingCommentIDs = append(pendingCommentIDs, vid)
-        }
-        processedVideos++
-        return nil
-    }
+	// Helper to ingest a single video record. This respects cutoff based on enableCutoff
+	// and updates state/queues accordingly.
+	ingestVideo := func(vid, publishedAt, title, desc, channelID, channelTitle, searchTerm string) error {
+		if vid == "" {
+			return nil
+		}
+		if _, ok := seen[vid]; ok {
+			return nil
+		}
+		// parse publishedAt if available for cutoff & year
+		var t time.Time
+		if publishedAt != "" {
+			if tt, err := time.Parse(time.RFC3339, publishedAt); err == nil {
+				t = tt
+				ts := t.Unix()
+				// skip older videos when enableCutoff is true
+				if enableCutoff && cutoff > 0 && ts <= cutoff {
+					return nil
+				}
+				if ts > maxTimestamp {
+					maxTimestamp = ts
+				}
+			}
+		}
+		seen[vid] = struct{}{}
+		year := t.UTC().Year()
+		inserted, err := store.InsertYouTubeVideoID(ctx, ticker, year, vid, time.Now().UTC(), &t, channelID, jobID)
+		if err != nil {
+			return err
+		}
+		if !inserted {
+			return nil
+		}
+		videoRec := map[string]interface{}{
+			"stage":         StageRaw,
+			"type":          "youtube_video",
+			"source":        source,
+			"ticker":        ticker,
+			"ingest_date":   ingestDate,
+			"job_id":        jobID,
+			"video_id":      vid,
+			"published_at":  publishedAt,
+			"title":         title,
+			"description":   cleanYTText(desc),
+			"channel_id":    channelID,
+			"channel_title": channelTitle,
+			"search_term":   searchTerm,
+		}
+		videoRowKey := "vid:" + vid
+		if err := pub.AddRecord(source, ticker, videoRowKey, videoRec); err != nil {
+			return err
+		}
+		// queue for comment harvesting (batched)
+		if _, exists := pendingSet[vid]; !exists {
+			pendingSet[vid] = struct{}{}
+			pendingCommentIDs = append(pendingCommentIDs, vid)
+		}
+		processedVideos++
+		return nil
+	}
 
-    // Define a structure to track progress per search term. Each term may contribute
-    // up to perTermTarget videos in a given run. We also track the next page token
-    // returned by the search API and whether the term has completed its quota.
-    type termState struct {
-        Term      string
-        Saved     int
-        PageToken string
-        Done      bool
-    }
+	// Define a structure to track progress per search term. Each term may contribute
+	// up to perTermTarget videos in a given run. We also track the next page token
+	// returned by the search API and whether the term has completed its quota.
+	type termState struct {
+		Term      string
+		Saved     int
+		PageToken string
+		Done      bool
+	}
 
-    mv := args.MaxVideos
-    if mv == 0 {
-        mv = 10
-    }
-    numTerms := len(terms)
-    perTermTarget := mv
-    if numTerms > 0 {
-        // ceil division to spread mv across terms
-        perTermTarget = (mv + numTerms - 1) / numTerms
-    }
-    // Initialize state for each term
-    states := make([]termState, len(terms))
-    for i, t := range terms {
-        states[i] = termState{Term: t, Saved: 0, PageToken: "", Done: false}
-    }
-    backfillBefore := ""
-    attempts := 0
-    // Attempt loop: each iteration widens the time window uniformly if we didn't reach mv
-    for attempts < 8 && processedVideos < mv {
-        // set enableCutoff based on whether we are backfilling
-        if backfillBefore != "" {
-            enableCutoff = false
-        } else {
-            enableCutoff = true
-        }
-        // Reset page tokens for a new window. Terms that already hit their target remain done.
-        for i := range states {
-            if states[i].Saved >= perTermTarget {
-                states[i].Done = true
-            }
-            states[i].PageToken = ""
-        }
-        // track the oldest publish time seen in this pass for determining next window
-        oldestAcross := time.Now().UTC()
-        progress := false
-        // FIRST PASS: fetch first page for each term
-        for idx := range states {
-            if processedVideos >= mv {
-                break
-            }
-            st := &states[idx]
-            if st.Done {
-                continue
-            }
-            if st.Saved >= perTermTarget {
-                st.Done = true
-                continue
-            }
-            // Build query for first page
-            q := url.Values{}
-            q.Set("q", st.Term)
-            q.Set("part", "id,snippet")
-            q.Set("type", "video")
-            q.Set("order", "date")
-            q.Set("maxResults", "50")
-            q.Set("relevanceLanguage", "en")
-            if backfillBefore != "" {
-                q.Set("publishedBefore", backfillBefore)
-            } else if cutoff > 0 {
-                q.Set("publishedAfter", time.Unix(cutoff, 0).UTC().Format(time.RFC3339))
-            }
-            q.Set("key", apiKey)
-            // Acquire permit and execute request
-            lease, err := acquirePermit(ctx, "youtube")
-            if err != nil {
-                emitMeta("job_failed", map[string]interface{}{"error": fmt.Sprintf("broker acquire: %v", err)})
-                return err
-            }
-            reqURL := "https://www.googleapis.com/youtube/v3/search?" + q.Encode()
-            req, _ := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-            req.Header.Set("User-Agent", "ingest-social-go/1.0")
-            var status int
-            var retryAfterMs int
-            var body []byte
-            resp, doErr := client.Do(req)
-            if resp != nil {
-                status = resp.StatusCode
-                retryAfterMs = parseRetryAfterMs(resp.Header.Get("Retry-After"), time.Now())
-                b, _ := io.ReadAll(resp.Body)
-                resp.Body.Close()
-                body = b
-            }
-            ok := (doErr == nil && status == http.StatusOK)
-            reportResult(ctx, lease.ID, ok, status, retryAfterMs)
-            if doErr != nil {
-                emitMeta("job_failed", map[string]interface{}{"error": fmt.Sprintf("HTTP error: %v", doErr)})
-                return doErr
-            }
-            if status != http.StatusOK {
-                err := fmt.Errorf("HTTP %d: %s", status, string(body))
-                emitMeta("job_failed", map[string]interface{}{"error": err.Error()})
-                return err
-            }
-            var searchRes struct {
-                NextPageToken string `json:"nextPageToken"`
-                Items         []struct {
-                    ID struct {
-                        VideoID string `json:"videoId"`
-                    } `json:"id"`
-                    Snippet struct {
-                        PublishedAt  string `json:"publishedAt"`
-                        Title        string `json:"title"`
-                        Description  string `json:"description"`
-                        ChannelID    string `json:"channelId"`
-                        ChannelTitle string `json:"channelTitle"`
-                    } `json:"snippet"`
-                } `json:"items"`
-            }
-            if err := json.Unmarshal(body, &searchRes); err != nil {
-                emitMeta("job_failed", map[string]interface{}{"error": fmt.Sprintf("unmarshal: %v", err)})
-                return err
-            }
-            if len(searchRes.Items) == 0 {
-                // no results: mark as done
-                st.Done = true
-                continue
-            }
-            // iterate items in the first page
-            pageOlder := false
-            for _, item := range searchRes.Items {
-                if processedVideos >= mv || st.Saved >= perTermTarget {
-                    break
-                }
-                vid := item.ID.VideoID
-                if vid == "" {
-                    continue
-                }
-                pubAt := item.Snippet.PublishedAt
-                // update oldestAcross
-                if t, err := time.Parse(time.RFC3339, pubAt); err == nil {
-                    if t.Before(oldestAcross) {
-                        oldestAcross = t
-                    }
-                }
-                // skip if this page includes a video older than cutoff during initial pass
-                if enableCutoff && cutoff > 0 {
-                    if t, err := time.Parse(time.RFC3339, pubAt); err == nil {
-                        if t.Unix() <= cutoff {
-                            pageOlder = true
-                            continue
-                        }
-                    }
-                }
-                if err := ingestVideo(vid, pubAt, item.Snippet.Title, item.Snippet.Description, item.Snippet.ChannelID, item.Snippet.ChannelTitle, st.Term); err != nil {
-                    emitMeta("job_failed", map[string]interface{}{"error": fmt.Sprintf("ingest: %v", err)})
-                    return err
-                }
-                st.Saved++
-                progress = true
-            }
-            // record next page token
-            st.PageToken = searchRes.NextPageToken
-            // if reached target or no more pages or page contained older-than-cutoff items, mark done
-            if st.Saved >= perTermTarget || st.PageToken == "" || pageOlder {
-                st.Done = true
-            }
-            // polite delay
-            if args.DelayMS > 0 {
-                time.Sleep(time.Duration(args.DelayMS) * time.Millisecond)
-            } else {
-                time.Sleep(50 * time.Millisecond)
-            }
-        }
-        // SECOND PASS: fetch one more page for terms still below target and with a page token
-        if processedVideos < mv {
-            for idx := range states {
-                if processedVideos >= mv {
-                    break
-                }
-                st := &states[idx]
-                if st.Done || st.Saved >= perTermTarget {
-                    continue
-                }
-                if st.PageToken == "" {
-                    st.Done = true
-                    continue
-                }
-                // Build query for second page
-                q := url.Values{}
-                q.Set("q", st.Term)
-                q.Set("part", "id,snippet")
-                q.Set("type", "video")
-                q.Set("order", "date")
-                q.Set("maxResults", "50")
-                q.Set("relevanceLanguage", "en")
-                q.Set("pageToken", st.PageToken)
-                if backfillBefore != "" {
-                    q.Set("publishedBefore", backfillBefore)
-                } else if cutoff > 0 {
-                    q.Set("publishedAfter", time.Unix(cutoff, 0).UTC().Format(time.RFC3339))
-                }
-                q.Set("key", apiKey)
-                // Acquire permit and execute request
-                lease, err := acquirePermit(ctx, "youtube")
-                if err != nil {
-                    emitMeta("job_failed", map[string]interface{}{"error": fmt.Sprintf("broker acquire: %v", err)})
-                    return err
-                }
-                reqURL := "https://www.googleapis.com/youtube/v3/search?" + q.Encode()
-                req, _ := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-                req.Header.Set("User-Agent", "ingest-social-go/1.0")
-                var status int
-                var retryAfterMs int
-                var body []byte
-                resp, doErr := client.Do(req)
-                if resp != nil {
-                    status = resp.StatusCode
-                    retryAfterMs = parseRetryAfterMs(resp.Header.Get("Retry-After"), time.Now())
-                    b, _ := io.ReadAll(resp.Body)
-                    resp.Body.Close()
-                    body = b
-                }
-                ok := (doErr == nil && status == http.StatusOK)
-                reportResult(ctx, lease.ID, ok, status, retryAfterMs)
-                if doErr != nil {
-                    emitMeta("job_failed", map[string]interface{}{"error": fmt.Sprintf("HTTP error: %v", doErr)})
-                    return doErr
-                }
-                if status != http.StatusOK {
-                    err := fmt.Errorf("HTTP %d: %s", status, string(body))
-                    emitMeta("job_failed", map[string]interface{}{"error": err.Error()})
-                    return err
-                }
-                var searchRes struct {
-                    NextPageToken string `json:"nextPageToken"`
-                    Items         []struct {
-                        ID struct {
-                            VideoID string `json:"videoId"`
-                        } `json:"id"`
-                        Snippet struct {
-                            PublishedAt  string `json:"publishedAt"`
-                            Title        string `json:"title"`
-                            Description  string `json:"description"`
-                            ChannelID    string `json:"channelId"`
-                            ChannelTitle string `json:"channelTitle"`
-                        } `json:"snippet"`
-                    } `json:"items"`
-                }
-                if err := json.Unmarshal(body, &searchRes); err != nil {
-                    emitMeta("job_failed", map[string]interface{}{"error": fmt.Sprintf("unmarshal: %v", err)})
-                    return err
-                }
-                if len(searchRes.Items) == 0 {
-                    st.Done = true
-                    continue
-                }
-                pageOlder := false
-                for _, item := range searchRes.Items {
-                    if processedVideos >= mv || st.Saved >= perTermTarget {
-                        break
-                    }
-                    vid := item.ID.VideoID
-                    if vid == "" {
-                        continue
-                    }
-                    pubAt := item.Snippet.PublishedAt
-                    if t, err := time.Parse(time.RFC3339, pubAt); err == nil {
-                        if t.Before(oldestAcross) {
-                            oldestAcross = t
-                        }
-                    }
-                    if enableCutoff && cutoff > 0 {
-                        if t, err := time.Parse(time.RFC3339, pubAt); err == nil {
-                            if t.Unix() <= cutoff {
-                                pageOlder = true
-                                continue
-                            }
-                        }
-                    }
-                    if err := ingestVideo(vid, pubAt, item.Snippet.Title, item.Snippet.Description, item.Snippet.ChannelID, item.Snippet.ChannelTitle, st.Term); err != nil {
-                        emitMeta("job_failed", map[string]interface{}{"error": fmt.Sprintf("ingest: %v", err)})
-                        return err
-                    }
-                    st.Saved++
-                    progress = true
-                }
-                st.PageToken = searchRes.NextPageToken
-                if st.Saved >= perTermTarget || st.PageToken == "" || pageOlder {
-                    st.Done = true
-                }
-                // polite delay
-                if args.DelayMS > 0 {
-                    time.Sleep(time.Duration(args.DelayMS) * time.Millisecond)
-                } else {
-                    time.Sleep(50 * time.Millisecond)
-                }
-            }
-        }
-        // If we've reached the overall max video count, break out
-        if processedVideos >= mv {
-            break
-        }
-        // If no progress was made across both passes, stop widening further
-        if !progress {
-            break
-        }
-        // Prepare next window by stepping further back in time
-        backfillBefore = oldestAcross.Add(-1 * time.Second).UTC().Format(time.RFC3339)
-        attempts++
-    }
-    // Final comment flush
-    if err := flushPendingComments(); err != nil {
-        emitMeta("job_failed", map[string]interface{}{"error": fmt.Sprintf("flush comments: %v", err)})
-        return err
-    }
-    // Update state: if we ingested any video newer than previous cutoff,
-    // advance last_search_at to that timestamp. Otherwise, do not advance it.
-    var stateTs *time.Time
-    if maxTimestamp > cutoff {
-        t := time.Unix(maxTimestamp, 0).UTC()
-        stateTs = &t
-    } else {
-        stateTs = nil
-    }
-    if err := store.UpdateYouTubeStateAt(ctx, ticker, stateTs); err != nil {
-        emitMeta("job_failed", map[string]interface{}{"error": fmt.Sprintf("state update: %v", err)})
-        return err
-    }
-    emitMeta("batch_committed", map[string]interface{}{"records": processedVideos})
-    durationMs := time.Since(startTime).Milliseconds()
-    emitMeta("job_completed", map[string]interface{}{"duration_ms": durationMs})
-    fmt.Printf("JOB_COMPLETED job_id=%s duration_ms=%d\n", jobID, durationMs)
-    fmt.Printf("PROCESSED job_id=%s videos=%d\n", jobID, processedVideos)
-    return nil
+	mv := args.MaxVideos
+	if mv == 0 {
+		mv = 10
+	}
+	numTerms := len(terms)
+	perTermTarget := mv
+	if numTerms > 0 {
+		// ceil division to spread mv across terms
+		perTermTarget = (mv + numTerms - 1) / numTerms
+	}
+	// Initialize state for each term
+	states := make([]termState, len(terms))
+	for i, t := range terms {
+		states[i] = termState{Term: t, Saved: 0, PageToken: "", Done: false}
+	}
+	backfillBefore := ""
+	attempts := 0
+	// Attempt loop: each iteration widens the time window uniformly if we didn't reach mv
+	for attempts < 8 && processedVideos < mv {
+		// set enableCutoff based on whether we are backfilling
+		if backfillBefore != "" {
+			enableCutoff = false
+		} else {
+			enableCutoff = true
+		}
+		// Reset page tokens for a new window. Terms that already hit their target remain done.
+		for i := range states {
+			if states[i].Saved >= perTermTarget {
+				states[i].Done = true
+			}
+			states[i].PageToken = ""
+		}
+		// track the oldest publish time seen in this pass for determining next window
+		oldestAcross := time.Now().UTC()
+		progress := false
+		// FIRST PASS: fetch first page for each term
+		for idx := range states {
+			if processedVideos >= mv {
+				break
+			}
+			st := &states[idx]
+			if st.Done {
+				continue
+			}
+			if st.Saved >= perTermTarget {
+				st.Done = true
+				continue
+			}
+			// Build query for first page
+			q := url.Values{}
+			q.Set("q", st.Term)
+			q.Set("part", "id,snippet")
+			q.Set("type", "video")
+			q.Set("order", "date")
+			q.Set("maxResults", "50")
+			q.Set("relevanceLanguage", "en")
+			if backfillBefore != "" {
+				q.Set("publishedBefore", backfillBefore)
+			} else if cutoff > 0 {
+				q.Set("publishedAfter", time.Unix(cutoff, 0).UTC().Format(time.RFC3339))
+			}
+			q.Set("key", apiKey)
+			// Acquire permit and execute request
+			lease, err := acquirePermit(ctx, "youtube")
+			if err != nil {
+				emitMeta("job_failed", map[string]interface{}{"error": fmt.Sprintf("broker acquire: %v", err)})
+				return err
+			}
+			reqURL := "https://www.googleapis.com/youtube/v3/search?" + q.Encode()
+			req, _ := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+			req.Header.Set("User-Agent", "ingest-social-go/1.0")
+			var status int
+			var retryAfterMs int
+			var body []byte
+			resp, doErr := client.Do(req)
+			if resp != nil {
+				status = resp.StatusCode
+				retryAfterMs = parseRetryAfterMs(resp.Header.Get("Retry-After"), time.Now())
+				b, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				body = b
+			}
+			ok := (doErr == nil && status == http.StatusOK)
+			reportResult(ctx, lease.ID, ok, status, retryAfterMs)
+			if doErr != nil {
+				emitMeta("job_failed", map[string]interface{}{"error": fmt.Sprintf("HTTP error: %v", doErr)})
+				return doErr
+			}
+			if status != http.StatusOK {
+				err := fmt.Errorf("HTTP %d: %s", status, string(body))
+				emitMeta("job_failed", map[string]interface{}{"error": err.Error()})
+				return err
+			}
+			var searchRes struct {
+				NextPageToken string `json:"nextPageToken"`
+				Items         []struct {
+					ID struct {
+						VideoID string `json:"videoId"`
+					} `json:"id"`
+					Snippet struct {
+						PublishedAt  string `json:"publishedAt"`
+						Title        string `json:"title"`
+						Description  string `json:"description"`
+						ChannelID    string `json:"channelId"`
+						ChannelTitle string `json:"channelTitle"`
+					} `json:"snippet"`
+				} `json:"items"`
+			}
+			if err := json.Unmarshal(body, &searchRes); err != nil {
+				emitMeta("job_failed", map[string]interface{}{"error": fmt.Sprintf("unmarshal: %v", err)})
+				return err
+			}
+			if len(searchRes.Items) == 0 {
+				// no results: mark as done
+				st.Done = true
+				continue
+			}
+			// iterate items in the first page
+			pageOlder := false
+			for _, item := range searchRes.Items {
+				if processedVideos >= mv || st.Saved >= perTermTarget {
+					break
+				}
+				vid := item.ID.VideoID
+				if vid == "" {
+					continue
+				}
+				pubAt := item.Snippet.PublishedAt
+				// update oldestAcross
+				if t, err := time.Parse(time.RFC3339, pubAt); err == nil {
+					if t.Before(oldestAcross) {
+						oldestAcross = t
+					}
+				}
+				// skip if this page includes a video older than cutoff during initial pass
+				if enableCutoff && cutoff > 0 {
+					if t, err := time.Parse(time.RFC3339, pubAt); err == nil {
+						if t.Unix() <= cutoff {
+							pageOlder = true
+							continue
+						}
+					}
+				}
+				if err := ingestVideo(vid, pubAt, item.Snippet.Title, item.Snippet.Description, item.Snippet.ChannelID, item.Snippet.ChannelTitle, st.Term); err != nil {
+					emitMeta("job_failed", map[string]interface{}{"error": fmt.Sprintf("ingest: %v", err)})
+					return err
+				}
+				st.Saved++
+				progress = true
+			}
+			// record next page token
+			st.PageToken = searchRes.NextPageToken
+			// if reached target or no more pages or page contained older-than-cutoff items, mark done
+			if st.Saved >= perTermTarget || st.PageToken == "" || pageOlder {
+				st.Done = true
+			}
+			// polite delay
+			if args.DelayMS > 0 {
+				time.Sleep(time.Duration(args.DelayMS) * time.Millisecond)
+			} else {
+				time.Sleep(50 * time.Millisecond)
+			}
+		}
+		// SECOND PASS: fetch one more page for terms still below target and with a page token
+		if processedVideos < mv {
+			for idx := range states {
+				if processedVideos >= mv {
+					break
+				}
+				st := &states[idx]
+				if st.Done || st.Saved >= perTermTarget {
+					continue
+				}
+				if st.PageToken == "" {
+					st.Done = true
+					continue
+				}
+				// Build query for second page
+				q := url.Values{}
+				q.Set("q", st.Term)
+				q.Set("part", "id,snippet")
+				q.Set("type", "video")
+				q.Set("order", "date")
+				q.Set("maxResults", "50")
+				q.Set("relevanceLanguage", "en")
+				q.Set("pageToken", st.PageToken)
+				if backfillBefore != "" {
+					q.Set("publishedBefore", backfillBefore)
+				} else if cutoff > 0 {
+					q.Set("publishedAfter", time.Unix(cutoff, 0).UTC().Format(time.RFC3339))
+				}
+				q.Set("key", apiKey)
+				// Acquire permit and execute request
+				lease, err := acquirePermit(ctx, "youtube")
+				if err != nil {
+					emitMeta("job_failed", map[string]interface{}{"error": fmt.Sprintf("broker acquire: %v", err)})
+					return err
+				}
+				reqURL := "https://www.googleapis.com/youtube/v3/search?" + q.Encode()
+				req, _ := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+				req.Header.Set("User-Agent", "ingest-social-go/1.0")
+				var status int
+				var retryAfterMs int
+				var body []byte
+				resp, doErr := client.Do(req)
+				if resp != nil {
+					status = resp.StatusCode
+					retryAfterMs = parseRetryAfterMs(resp.Header.Get("Retry-After"), time.Now())
+					b, _ := io.ReadAll(resp.Body)
+					resp.Body.Close()
+					body = b
+				}
+				ok := (doErr == nil && status == http.StatusOK)
+				reportResult(ctx, lease.ID, ok, status, retryAfterMs)
+				if doErr != nil {
+					emitMeta("job_failed", map[string]interface{}{"error": fmt.Sprintf("HTTP error: %v", doErr)})
+					return doErr
+				}
+				if status != http.StatusOK {
+					err := fmt.Errorf("HTTP %d: %s", status, string(body))
+					emitMeta("job_failed", map[string]interface{}{"error": err.Error()})
+					return err
+				}
+				var searchRes struct {
+					NextPageToken string `json:"nextPageToken"`
+					Items         []struct {
+						ID struct {
+							VideoID string `json:"videoId"`
+						} `json:"id"`
+						Snippet struct {
+							PublishedAt  string `json:"publishedAt"`
+							Title        string `json:"title"`
+							Description  string `json:"description"`
+							ChannelID    string `json:"channelId"`
+							ChannelTitle string `json:"channelTitle"`
+						} `json:"snippet"`
+					} `json:"items"`
+				}
+				if err := json.Unmarshal(body, &searchRes); err != nil {
+					emitMeta("job_failed", map[string]interface{}{"error": fmt.Sprintf("unmarshal: %v", err)})
+					return err
+				}
+				if len(searchRes.Items) == 0 {
+					st.Done = true
+					continue
+				}
+				pageOlder := false
+				for _, item := range searchRes.Items {
+					if processedVideos >= mv || st.Saved >= perTermTarget {
+						break
+					}
+					vid := item.ID.VideoID
+					if vid == "" {
+						continue
+					}
+					pubAt := item.Snippet.PublishedAt
+					if t, err := time.Parse(time.RFC3339, pubAt); err == nil {
+						if t.Before(oldestAcross) {
+							oldestAcross = t
+						}
+					}
+					if enableCutoff && cutoff > 0 {
+						if t, err := time.Parse(time.RFC3339, pubAt); err == nil {
+							if t.Unix() <= cutoff {
+								pageOlder = true
+								continue
+							}
+						}
+					}
+					if err := ingestVideo(vid, pubAt, item.Snippet.Title, item.Snippet.Description, item.Snippet.ChannelID, item.Snippet.ChannelTitle, st.Term); err != nil {
+						emitMeta("job_failed", map[string]interface{}{"error": fmt.Sprintf("ingest: %v", err)})
+						return err
+					}
+					st.Saved++
+					progress = true
+				}
+				st.PageToken = searchRes.NextPageToken
+				if st.Saved >= perTermTarget || st.PageToken == "" || pageOlder {
+					st.Done = true
+				}
+				// polite delay
+				if args.DelayMS > 0 {
+					time.Sleep(time.Duration(args.DelayMS) * time.Millisecond)
+				} else {
+					time.Sleep(50 * time.Millisecond)
+				}
+			}
+		}
+		// If we've reached the overall max video count, break out
+		if processedVideos >= mv {
+			break
+		}
+		// If no progress was made across both passes, stop widening further
+		if !progress {
+			break
+		}
+		// Prepare next window by stepping further back in time
+		backfillBefore = oldestAcross.Add(-1 * time.Second).UTC().Format(time.RFC3339)
+		attempts++
+	}
+	// Final comment flush
+	if err := flushPendingComments(); err != nil {
+		emitMeta("job_failed", map[string]interface{}{"error": fmt.Sprintf("flush comments: %v", err)})
+		return err
+	}
+	// Update state: if we ingested any video newer than previous cutoff,
+	// advance last_search_at to that timestamp. Otherwise, do not advance it.
+	var stateTs *time.Time
+	if maxTimestamp > cutoff {
+		t := time.Unix(maxTimestamp, 0).UTC()
+		stateTs = &t
+	} else {
+		stateTs = nil
+	}
+	if err := store.UpdateYouTubeStateAt(ctx, ticker, stateTs); err != nil {
+		emitMeta("job_failed", map[string]interface{}{"error": fmt.Sprintf("state update: %v", err)})
+		return err
+	}
+	emitMeta("batch_committed", map[string]interface{}{"records": processedVideos})
+	durationMs := time.Since(startTime).Milliseconds()
+	emitMeta("job_completed", map[string]interface{}{"duration_ms": durationMs})
+	fmt.Printf("JOB_COMPLETED job_id=%s duration_ms=%d\n", jobID, durationMs)
+	fmt.Printf("PROCESSED job_id=%s videos=%d\n", jobID, processedVideos)
+	return nil
 }
