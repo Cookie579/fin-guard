@@ -120,14 +120,3 @@ func dedupeTrim(in []string) []string {
 	}
 	return out
 }
-
-func LoadYouTubeAPIKeys() ([]string, error) {
-	cfg, err := LoadConfig()
-	if err != nil {
-		return nil, err
-	}
-	if len(cfg.YouTubeAPIKeys) == 0 {
-		return nil, errors.New("config.json: youtube_keys is empty or missing")
-	}
-	return dedupeTrim(cfg.YouTubeAPIKeys), nil
-}
