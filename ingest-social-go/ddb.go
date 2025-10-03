@@ -289,42 +289,81 @@ func (s *DynamoStore) InsertYouTubeVideoID(ctx context.Context, ticker string, y
 	return true, nil
 }
 
-
+// CheckAndMarkStocktwitsSeen records a StockTwits message ID as processed for
+// the given ticker. The method attempts to insert a row into the
+// DdbStocktwitsSeenTable with the composite key (pk, message_id) where
+// pk is "stocktwits#<TICKER>". A ttl attribute is set based on
+// StocktwitsSeenTTLDays to allow DynamoDB to automatically expire old
+// entries. If the message ID already exists for the ticker the
+// underlying conditional write fails and the method returns (false, nil).
+// On success the row is created and (true, nil) is returned. Any other
+// error is bubbled up. Callers can use the returned boolean to decide
+// whether to emit a Kinesis record for this ticker. This helper provides
+// simple deduplication semantics across repeated runs and cross-ticker
+// ingestion.
+func (s *DynamoStore) CheckAndMarkStocktwitsSeen(ctx context.Context, ticker string, messageID int64) (bool, error) {
+	// Compose the partition key as stocktwits#<TICKER>
+	pk := fmt.Sprintf("stocktwits#%s", strings.ToUpper(ticker))
+	// The sort key is the numeric message ID
+	sk := strconv.FormatInt(messageID, 10)
+	// Compute an expiration timestamp based on the configured TTL in days
+	ttlSecs := time.Now().UTC().Unix() + int64(StocktwitsSeenTTLDays*24*60*60)
+	item := map[string]types.AttributeValue{
+		"pk":         &types.AttributeValueMemberS{Value: pk},
+		"message_id": &types.AttributeValueMemberN{Value: sk},
+		"ttl":        &types.AttributeValueMemberN{Value: strconv.FormatInt(ttlSecs, 10)},
+	}
+	input := &dynamodb.PutItemInput{
+		TableName:           aws.String(DdbStocktwitsSeenTable),
+		Item:                item,
+		ConditionExpression: aws.String("attribute_not_exists(message_id)"),
+	}
+	_, err := s.client.PutItem(ctx, input)
+	if err != nil {
+		var ccfe *types.ConditionalCheckFailedException
+		if errors.As(err, &ccfe) {
+			// Already exists – return duplicate marker
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
 
 // UpdateYouTubeStateAt sets updated_at and optionally last_search_at to a specific timestamp.
 // If ts is nil, only updated_at is modified (useful when no new videos were ingested).
 func (s *DynamoStore) UpdateYouTubeStateAt(ctx context.Context, ticker string, ts *time.Time) error {
-    pk := fmt.Sprintf("youtube#%s", strings.ToUpper(ticker))
-    now := time.Now().UTC().Format(time.RFC3339)
-    if ts != nil {
-        at := ts.UTC().Format(time.RFC3339)
-        input := &dynamodb.UpdateItemInput{
-            TableName: aws.String(DdbStateTable),
-            Key: map[string]types.AttributeValue{
-                "pk": &types.AttributeValueMemberS{Value: pk},
-            },
-            UpdateExpression: aws.String("SET last_search_at = :at, updated_at = :now"),
-            ExpressionAttributeValues: map[string]types.AttributeValue{
-                ":at":  &types.AttributeValueMemberS{Value: at},
-                ":now": &types.AttributeValueMemberS{Value: now},
-            },
-            ReturnValues: types.ReturnValueNone,
-        }
-        _, err := s.client.UpdateItem(ctx, input)
-        return err
-    }
-    // only bump updated_at
-    input := &dynamodb.UpdateItemInput{
-        TableName: aws.String(DdbStateTable),
-        Key: map[string]types.AttributeValue{
-            "pk": &types.AttributeValueMemberS{Value: pk},
-        },
-        UpdateExpression: aws.String("SET updated_at = :now"),
-        ExpressionAttributeValues: map[string]types.AttributeValue{
-            ":now": &types.AttributeValueMemberS{Value: now},
-        },
-        ReturnValues: types.ReturnValueNone,
-    }
-    _, err := s.client.UpdateItem(ctx, input)
-    return err
+	pk := fmt.Sprintf("youtube#%s", strings.ToUpper(ticker))
+	now := time.Now().UTC().Format(time.RFC3339)
+	if ts != nil {
+		at := ts.UTC().Format(time.RFC3339)
+		input := &dynamodb.UpdateItemInput{
+			TableName: aws.String(DdbStateTable),
+			Key: map[string]types.AttributeValue{
+				"pk": &types.AttributeValueMemberS{Value: pk},
+			},
+			UpdateExpression: aws.String("SET last_search_at = :at, updated_at = :now"),
+			ExpressionAttributeValues: map[string]types.AttributeValue{
+				":at":  &types.AttributeValueMemberS{Value: at},
+				":now": &types.AttributeValueMemberS{Value: now},
+			},
+			ReturnValues: types.ReturnValueNone,
+		}
+		_, err := s.client.UpdateItem(ctx, input)
+		return err
+	}
+	// only bump updated_at
+	input := &dynamodb.UpdateItemInput{
+		TableName: aws.String(DdbStateTable),
+		Key: map[string]types.AttributeValue{
+			"pk": &types.AttributeValueMemberS{Value: pk},
+		},
+		UpdateExpression: aws.String("SET updated_at = :now"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":now": &types.AttributeValueMemberS{Value: now},
+		},
+		ReturnValues: types.ReturnValueNone,
+	}
+	_, err := s.client.UpdateItem(ctx, input)
+	return err
 }

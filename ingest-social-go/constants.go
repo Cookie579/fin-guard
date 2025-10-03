@@ -33,6 +33,22 @@ const (
 	// duplicate harvests and enables idempotent insert behaviour.
 	DdbYTIdsTable = "social_youtube_video_ids"
 
+	// DdbStocktwitsSeenTable is the DynamoDB table that stores every
+	// processed StockTwits message ID per ticker. Each row uses a
+	// composite key of pk=stocktwits#<TICKER> and message_id. A TTL
+	// attribute is set on each row so that old IDs are automatically
+	// expired. This table is used by the StockTwits runner to skip
+	// duplicate messages when they have already been ingested under
+	// another ticker or in a previous run.
+	DdbStocktwitsSeenTable = "social_stocktwits_seen"
+
+	// StocktwitsSeenTTLDays controls how many days seen StockTwits
+	// message identifiers will live in the DdbStocktwitsSeenTable. A
+	// moderate TTL allows enough time for backfill windows to advance
+	// while automatically pruning very old message IDs. The TTL is
+	// translated into seconds when computing the expiration timestamp.
+	StocktwitsSeenTTLDays = 14
+
 	// LockHeartbeatSeconds controls how often a running job should heartbeat
 	// to the lock table. If a job fails to heartbeat before its lock expires
 	// another collector may acquire the lock. See LockTTLSeconds.

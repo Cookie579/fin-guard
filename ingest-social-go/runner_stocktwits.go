@@ -243,24 +243,40 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 				maxIDThisPage = msg.ID
 			}
 
-			var syms []string
+			// Build a list of unique symbols mentioned in the message. We always
+			// include the job's ticker so that a message is emitted for the
+			// primary symbol even if StockTwits omits it from the symbols
+			// array. Symbols are uppercased for consistency.
+			uniqueSyms := make(map[string]struct{})
+			// Always include the job ticker
+			uniqueSyms[strings.ToUpper(ticker)] = struct{}{}
 			for _, s := range msg.Symbols {
 				if s.Symbol != "" {
-					syms = append(syms, strings.ToUpper(s.Symbol))
+					uniqueSyms[strings.ToUpper(s.Symbol)] = struct{}{}
 				}
 			}
+			// Extract the basic sentiment value (e.g. "Bullish", "Bearish", "None")
 			sentiment := msg.Entities.Sentiment.Basic
+			// Base record payload shared across all symbols. Note that we
+			// temporarily set the ticker field to the job ticker; this will
+			// be overridden per symbol below.
 			rec := map[string]any{
-				"stage":         StageRaw,
-				"type":          "stocktwits_message",
-				"source":        source,
-				"ticker":        ticker,
-				"ingest_date":   ingestDate,
-				"job_id":        jobID,
-				"message_id":    msg.ID,
-				"created_at":    msg.CreatedAt,
-				"text":          msg.Body,
-				"symbols":       syms,
+				"stage":       StageRaw,
+				"type":        "stocktwits_message",
+				"source":      source,
+				"ticker":      ticker,
+				"ingest_date": ingestDate,
+				"job_id":      jobID,
+				"message_id":  msg.ID,
+				"created_at":  msg.CreatedAt,
+				"text":        msg.Body,
+				"symbols": func() []string { // list of all symbols as slice
+					syms := make([]string, 0, len(uniqueSyms))
+					for sym := range uniqueSyms {
+						syms = append(syms, sym)
+					}
+					return syms
+				}(),
 				"sentiment":     sentiment,
 				"likes":         msg.Likes.Total,
 				"reshares":      msg.Reshares.ResharedCount,
@@ -268,12 +284,30 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 				"user_username": msg.User.Username,
 			}
 			rowKey := strconv.FormatInt(msg.ID, 10)
-			if err := pub.AddRecord(source, ticker, rowKey, rec); err != nil {
-				emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("publish: %v", err)})
-				return err
+			// Publish the message once for each unique symbol. We attempt to
+			// insert into the per‑ticker seen table first; only if the
+			// insertion succeeds (meaning we have not processed this ID for
+			// that ticker before) do we emit a Kinesis record. This avoids
+			// duplicate writes across backfill runs and cross‑ticker jobs.
+			for sym := range uniqueSyms {
+				inserted, serr := store.CheckAndMarkStocktwitsSeen(ctx, sym, msg.ID)
+				if serr != nil {
+					emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("seen insert: %v", serr)})
+					return serr
+				}
+				if !inserted {
+					// Already processed for this ticker; skip publishing but
+					// still continue for other symbols.
+					continue
+				}
+				recCopy := maps.Clone(rec)
+				recCopy["ticker"] = sym
+				if err := pub.AddRecord(source, sym, rowKey, recCopy); err != nil {
+					emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("publish: %v", err)})
+					return err
+				}
+				processedCount++
 			}
-			processedCount++
-
 			// Only grow latestID (forward/newer side)
 			if msg.ID > latestID {
 				latestID = msg.ID
