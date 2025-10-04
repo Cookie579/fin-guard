@@ -909,15 +909,30 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 				}
 			}
 		}
-		// If we've reached the overall max video count, break out
+		// If we've reached the overall max video count, stop
 		if processedVideos >= mv {
 			break
 		}
-		// If no progress was made across both passes, stop widening further
+		// If we made no progress above the cutoff, immediately pivot to backfill
+		// starting at the cutoff boundary (instead of exiting). This avoids exiting
+		// early when there are no new videos but older, unseen videos remain.
 		if !progress {
+			// Use the stored cutoff timestamp to pivot into backfill mode. When cutoff
+			// is set (> 0), we set backfillBefore to that time and continue the
+			// attempt loop. This causes the next pass to disable the cutoff and
+			// harvest older videos before that timestamp. If no cutoff is recorded,
+			// we cannot widen further, so we exit the loop.
+			if cutoff > 0 {
+				backfillBefore = time.Unix(cutoff, 0).UTC().Format(time.RFC3339)
+				attempts++
+				continue
+			}
+			// No cutoff recorded; nothing to widen from
 			break
 		}
-		// Prepare next window by stepping further back in time
+		// Otherwise, widen window normally using the oldest seen this pass. Step
+		// back one second from oldestAcross so we don't re-ingest the same video
+		// on the next pass.
 		backfillBefore = oldestAcross.Add(-1 * time.Second).UTC().Format(time.RFC3339)
 		attempts++
 	}
