@@ -19,5 +19,37 @@ spec:
         - name: ingest-sec-go
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # When no --ticker flag is provided, the ingest-sec-go binary falls back to starting
+          # the FastAPI orchestrator on port 8081. No explicit command override is necessary;
+          # we rely on the image entrypoint to invoke the Go binary, which will spawn the
+          # orchestrator automatically. See main.go for details.
           ports:
-            - containerPort: 8080
+            - containerPort: 8081
+              name: http
+          env:
+            - name: RUNNER_IMAGE
+              value: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+            - name: RUNNER_SERVICEACCOUNT
+              value: {{ .Values.serviceAccount.name | quote }}
+            - name: IMAGE_PULL_SECRET
+              value: {{ (index .Values.imagePullSecrets 0).name | quote }}
+            - name: AWS_REGION
+              value: {{ .Values.aws.region | default "us-east-1" | quote }}
+            - name: CONFIG_SECRET
+              value: {{ .Values.configSecret | default "preprocess-config" | quote }}
+            # Additional environment variables can be provided via extraEnv in values.yaml
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          readinessProbe:
+            httpGet: { path: "/", port: 8081 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 6
+          livenessProbe:
+            httpGet: { path: "/", port: 8081 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3

@@ -10,10 +10,29 @@ imagePullSecrets:
 
 service:
   type: ClusterIP
-  port: 8080
+  port: 8081
 
 resources: {}
 
 serviceAccount:
   name: ingest-sec-go-sa
   roleArn: arn:aws:iam::084071638445:role/ingest-sec-go-irsa-role
+
+# AWS configuration for the worker Jobs launched by the orchestrator.
+aws:
+  # Region for AWS SDK inside the worker pods.
+  region: us-east-1
+
+# Name of the Secret containing config.json. The worker mounts this secret at
+# /app/config.json so it can read API keys. Update this if your secret name
+# differs.
+configSecret: preprocess-config
+
+# Additional environment variables for the orchestrator container (optional).
+#extraEnv:
+#  - name: SOME_ENV
+#    value: "some-value"
+
+# Additional volumes and mounts for the orchestrator container (optional).
+#extraVolumes: []
+#extraVolumeMounts: []
