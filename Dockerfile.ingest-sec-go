@@ -1,32 +1,61 @@
-# ────────────────────────────────
-# Stage 1: Build
-# ────────────────────────────────
-FROM golang:1.24.4-alpine AS builder
-WORKDIR /app
+# syntax=docker/dockerfile:1
 
-# ✅ Copy root-level Go module files
-COPY go.mod go.sum ./
-RUN go mod download
+############################
+# Stage 1: Build Go runner #
+############################
+FROM golang:1.22-bullseye AS gobuilder
 
-# ✅ Copy the entire source tree (now all code is in a single module)
+WORKDIR /src
+# Copy the whole repo to avoid path ambiguity (some repos keep go.mod at root)
 COPY . .
 
-# ✅ Set working directory for the service
+# Build the ingest-sec-go runner as a static Linux binary.
+# Adjust the working directory below if your main.go lives elsewhere.
+WORKDIR /src/ingest-sec-go
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=$(go env GOARCH) \
+    go build -trimpath -ldflags="-s -w" -o /out/ingest-sec-go .
+
+
+################################
+# Stage 2: Runtime w/ Python 3 #
+################################
+FROM python:3.11-slim AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# OS deps: CA certs for HTTPS (SEC/AWS), tini for proper PID 1 signal handling (optional)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates tini \
+    && rm -rf /var/lib/apt/lists/*
+
+# Workdir for the orchestrator and runner
 WORKDIR /app/ingest-sec-go
 
-# ✅ Build the binary
-RUN go build -o ingest-sec-go .
+# Copy orchestrator + launcher scripts (Python code)
+# If your files live under a different path, adjust these COPY lines.
+COPY ingest-sec-go/orchestrator.py ./orchestrator.py
+COPY ingest-sec-go/k8s_launcher.py ./k8s_launcher.py
 
-# ────────────────────────────────
-# Stage 2: Runtime (minimal)
-# ────────────────────────────────
-FROM alpine:latest
-WORKDIR /root/
+# Copy the compiled Go runner binary
+COPY --from=gobuilder /out/ingest-sec-go /app/ingest-sec-go/ingest-sec-go
 
-# Copy the compiled binary
-COPY --from=builder /app/ingest-sec-go/ingest-sec-go .
+# Python dependencies for the orchestrator
+# Add/remove as needed to match your orchestrator imports.
+RUN pip install --no-cache-dir \
+      fastapi \
+      "uvicorn[standard]" \
+      kubernetes \
+      boto3 \
+      requests
 
-# Copy companies.json from root if needed
-COPY companies.json .
+# Make sure the runner is executable
+RUN chmod +x /app/ingest-sec-go/ingest-sec-go
 
-ENTRYPOINT ["./ingest-sec-go"]
+# Expose the FastAPI port
+EXPOSE 8081
+
+# Default: run the orchestrator so the Deployment stays up.
+# CronJobs should override CMD to run: /app/ingest-sec-go/ingest-sec-go --ticker AAPL
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["python3", "-m", "uvicorn", "orchestrator:app", "--host", "0.0.0.0", "--port", "8081"]
