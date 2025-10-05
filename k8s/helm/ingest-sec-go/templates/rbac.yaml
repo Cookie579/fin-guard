@@ -1,0 +1,31 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  # Bind this Role to the name of the Helm release so it is unique per deployment
+  name: {{ include "ingest-sec-go.fullname" . }}-orchestrator
+  namespace: {{ .Release.Namespace }}
+rules:
+  # Allow the orchestrator to create, list, get, watch and delete Jobs and CronJobs
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["create", "get", "list", "watch", "delete"]
+  # Allow the orchestrator to list and watch pods and read logs so it can stream logs
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  # Bind the orchestrator Role to the orchestrator ServiceAccount
+  name: {{ include "ingest-sec-go.fullname" . }}-orchestrator
+  namespace: {{ .Release.Namespace }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ .Values.serviceAccount.name }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "ingest-sec-go.fullname" . }}-orchestrator
