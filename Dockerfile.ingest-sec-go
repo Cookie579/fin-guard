@@ -1,61 +1,41 @@
 # syntax=docker/dockerfile:1
 
-############################
-# Stage 1: Build Go runner #
-############################
-FROM golang:1.22-bullseye AS gobuilder
+# Base: Python for FastAPI orchestrator, plus we'll install Go toolchain.
+FROM python:3.12-slim
 
-WORKDIR /src
-# Copy the whole repo to avoid path ambiguity (some repos keep go.mod at root)
+ARG GO_VERSION=1.24.4
+
+# Minimal OS deps + install Go toolchain
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates bash tini \
+ && curl -fsSL https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz -o /tmp/go.tgz \
+ && rm -rf /usr/local/go && tar -C /usr/local -xzf /tmp/go.tgz \
+ && rm -f /tmp/go.tgz \
+ && apt-get purge -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+
+ENV PATH="/usr/local/go/bin:${PATH}" \
+    GOTOOLCHAIN=auto \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+# Python deps for the orchestrator
+RUN pip install --no-cache-dir fastapi "uvicorn[standard]" kubernetes boto3 requests
+
+WORKDIR /app
+
+# Copy repo contents (adjust if you build from a subdir)
 COPY . .
 
-# Build the ingest-sec-go runner as a static Linux binary.
-# Adjust the working directory below if your main.go lives elsewhere.
-WORKDIR /src/ingest-sec-go
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=$(go env GOARCH) \
-    go build -trimpath -ldflags="-s -w" -o /out/ingest-sec-go .
+# Build the Go runner once at image build time → /app/bin/ingest-sec-go
+RUN mkdir -p /app/bin && \
+    CGO_ENABLED=0 /usr/local/go/bin/go build -trimpath -ldflags "-s -w" \
+      -o /app/bin/ingest-sec-go ./ingest-sec-go
 
+# Add bootstrap to launch orchestrator so the Deployment stays up
+COPY ingest-sec-go/bootstrap.sh /app/bootstrap.sh
+RUN chmod +x /app/bootstrap.sh
 
-################################
-# Stage 2: Runtime w/ Python 3 #
-################################
-FROM python:3.11-slim AS runtime
-
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
-
-# OS deps: CA certs for HTTPS (SEC/AWS), tini for proper PID 1 signal handling (optional)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates tini \
-    && rm -rf /var/lib/apt/lists/*
-
-# Workdir for the orchestrator and runner
-WORKDIR /app/ingest-sec-go
-
-# Copy orchestrator + launcher scripts (Python code)
-# If your files live under a different path, adjust these COPY lines.
-COPY ingest-sec-go/orchestrator.py ./orchestrator.py
-COPY ingest-sec-go/k8s_launcher.py ./k8s_launcher.py
-
-# Copy the compiled Go runner binary
-COPY --from=gobuilder /out/ingest-sec-go /app/ingest-sec-go/ingest-sec-go
-
-# Python dependencies for the orchestrator
-# Add/remove as needed to match your orchestrator imports.
-RUN pip install --no-cache-dir \
-      fastapi \
-      "uvicorn[standard]" \
-      kubernetes \
-      boto3 \
-      requests
-
-# Make sure the runner is executable
-RUN chmod +x /app/ingest-sec-go/ingest-sec-go
-
-# Expose the FastAPI port
 EXPOSE 8081
 
-# Default: run the orchestrator so the Deployment stays up.
-# CronJobs should override CMD to run: /app/ingest-sec-go/ingest-sec-go --ticker AAPL
-ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["python3", "-m", "uvicorn", "orchestrator:app", "--host", "0.0.0.0", "--port", "8081"]
+ENTRYPOINT ["/usr/bin/tini","--"]
+CMD ["/bin/bash","/app/bootstrap.sh"]
