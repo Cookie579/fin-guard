@@ -1,7 +1,8 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  # Bind this Role to the name of the Helm release so it is unique per deployment
+  # Use a name derived from the release to avoid collisions when multiple
+  # instances of this chart are installed. See helpers.tpl for definitions.
   name: {{ include "ingest-sec-go.fullname" . }}-orchestrator
   namespace: {{ .Release.Namespace }}
 rules:
@@ -18,12 +19,13 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  # Bind the orchestrator Role to the orchestrator ServiceAccount
+  # Bind the orchestrator Role to the orchestrator ServiceAccount. The name
+  # mirrors the Role name for clarity.
   name: {{ include "ingest-sec-go.fullname" . }}-orchestrator
   namespace: {{ .Release.Namespace }}
 subjects:
   - kind: ServiceAccount
-    name: {{ .Values.serviceAccount.name }}
+    name: {{ include "ingest-sec-go.serviceAccountName" . }}
     namespace: {{ .Release.Namespace }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
