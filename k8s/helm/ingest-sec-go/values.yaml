@@ -36,3 +36,9 @@ configSecret: preprocess-config
 # Additional volumes and mounts for the orchestrator container (optional).
 #extraVolumes: []
 #extraVolumeMounts: []
+
+secHttpUa:
+  create: true
+  name: sec-http-ua
+  key: SEC_HTTP_UA
+  value: "FinGuardSEC/1.0 (contact: esg-finguard@gmail.com)"
