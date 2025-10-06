@@ -57,11 +57,45 @@ def _make_pod_spec(container: client.V1Container) -> client.V1PodSpec:
 
 
 def _default_labels(ticker: str) -> dict:
+    """
+    Construct a base set of Kubernetes labels for the given ticker.  In
+    addition to standard app labels, a timestamp is included to aid in
+    debugging and correlating Jobs to specific launch times.  However,
+    Kubernetes imposes strict formatting rules on label values: they may
+    only contain alphanumeric characters, dashes, underscores and dots,
+    must start and end with an alphanumeric character, and cannot
+    include colons.  Using the raw ISO8601 timestamp (e.g.
+    ``2025-10-06T08:40:38Z``) violates this restriction because of the
+    embedded colons.  To satisfy the constraints we generate a
+    timestamp without colon characters using ``strftime``.  The output
+    follows the pattern ``YYYY-MM-DDTHHMMSSZ`` which preserves human
+    readability while conforming to the label regex.
+
+    Args:
+        ticker: Stock ticker symbol (case-insensitive).
+
+    Returns:
+        A dictionary of label key/value pairs safe for use on both Job
+        metadata and pod templates.
+    """
+    # Generate a UTC timestamp that avoids characters disallowed in
+    # Kubernetes label values.  A typical ISO8601 string like
+    # ``2025-10-06T08:40:38Z`` contains colon characters, which are
+    # rejected by Kubernetes.  Instead we remove the colons from the
+    # time portion while retaining the date/time separator 'T' and
+    # trailing 'Z' for readability.
+    timestamp = datetime.utcnow().strftime("%Y-%m-%dT%H%M%SZ")
     return {
         "app.kubernetes.io/name": "ingest-sec-go",
         "app.kubernetes.io/component": "runner",
+        # Normalize the ticker to uppercase for consistency.  Label
+        # values must start and end with an alphanumeric character,
+        # which is satisfied by uppercase letters and digits.
         "sec.ticker": ticker.upper(),
-        "job.launchTs": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        # Include the sanitized launch timestamp as a label.  This makes
+        # it easy to filter Jobs by their launch time using label
+        # selectors while avoiding invalid characters.
+        "job.launchTs": timestamp,
     }
 
 
