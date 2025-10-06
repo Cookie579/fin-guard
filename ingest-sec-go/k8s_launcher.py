@@ -1,4 +1,5 @@
 import os
+import re
 import uuid
 from datetime import datetime
 from kubernetes import client, config
@@ -13,6 +14,30 @@ AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 # Keep finished Jobs a while so you can tail logs
 TTL_SECONDS_AFTER_FINISHED = int(os.getenv("JOB_TTL_SECONDS", "1200"))  # 20 minutes
 
+# ----- helpers: label-safe strings -----
+_LABEL_MAX = 63
+_LABEL_SAFE_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+def _labelize(value: str) -> str:
+    """
+    Make a value safe for k8s label value constraints:
+      - only [A-Za-z0-9._-]
+      - must start/end with alphanumeric
+      - <= 63 chars
+    """
+    if value is None:
+        value = ""
+    s = _LABEL_SAFE_RE.sub("-", str(value))
+    # trim non-alnum at start/end
+    s = re.sub(r"^[^A-Za-z0-9]+", "", s)
+    s = re.sub(r"[^A-Za-z0-9]+$", "", s)
+    if not s:
+        s = "x"
+    return s[:_LABEL_MAX]
+
+def _launch_ts_label() -> str:
+    # e.g., 20251006T153730Z (label-safe, sortable-ish)
+    return datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
 
 def _ensure_kubeconfig():
     """
@@ -23,7 +48,6 @@ def _ensure_kubeconfig():
     except Exception:
         config.load_kube_config()
 
-
 def _make_container(ticker: str, extra_args=None) -> client.V1Container:
     if extra_args is None:
         extra_args = []
@@ -33,6 +57,15 @@ def _make_container(ticker: str, extra_args=None) -> client.V1Container:
 
     env = [
         client.V1EnvVar(name="AWS_REGION", value=AWS_REGION),
+        # If you wired a Secret for SEC UA, uncomment and ensure the Secret exists:
+        # client.V1EnvVar(
+        #     name="SEC_HTTP_UA",
+        #     value_from=client.V1EnvVarSource(
+        #         secret_key_ref=client.V1SecretKeySelector(
+        #             name="sec-http-ua", key="SEC_HTTP_UA", optional=True
+        #         )
+        #     ),
+        # ),
     ]
 
     return client.V1Container(
@@ -41,7 +74,6 @@ def _make_container(ticker: str, extra_args=None) -> client.V1Container:
         args=args,
         env=env,
     )
-
 
 def _make_pod_spec(container: client.V1Container) -> client.V1PodSpec:
     image_pull_secrets = []
@@ -55,15 +87,13 @@ def _make_pod_spec(container: client.V1Container) -> client.V1PodSpec:
         image_pull_secrets=image_pull_secrets,
     )
 
-
 def _default_labels(ticker: str) -> dict:
     return {
         "app.kubernetes.io/name": "ingest-sec-go",
         "app.kubernetes.io/component": "runner",
-        "sec.ticker": ticker.upper(),
-        "job.launchTs": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "sec.ticker": _labelize(ticker.upper()),
+        "job.launchTs": _launch_ts_label(),
     }
-
 
 def launch_job(ticker: str, extra_args=None) -> str:
     """
@@ -78,7 +108,7 @@ def launch_job(ticker: str, extra_args=None) -> str:
 
     # Generate a unique, readable name: sec-<ticker>-<5char>
     suffix = uuid.uuid4().hex[:5]
-    name = f"sec-{ticker.lower()}-{suffix}"
+    name = f"sec-{_labelize(ticker).lower()}-{suffix}"
 
     container = _make_container(ticker, extra_args)
     pod_spec = _make_pod_spec(container)
@@ -105,7 +135,6 @@ def launch_job(ticker: str, extra_args=None) -> str:
     batch.create_namespaced_job(namespace=NAMESPACE, body=job)
     return name
 
-
 def launch_cronjob(ticker: str, schedule: str, extra_args=None, suspend: bool = False) -> str:
     """
     Launch (create or replace) a Kubernetes CronJob that runs the SEC runner on a schedule.
@@ -123,7 +152,7 @@ def launch_cronjob(ticker: str, schedule: str, extra_args=None, suspend: bool = 
     batch = client.BatchV1Api()
 
     # Stable, readable name for the cron workload
-    name = f"sec-{ticker.lower()}-cron"
+    name = f"sec-{_labelize(ticker).lower()}-cron"
 
     container = _make_container(ticker, extra_args)
     pod_spec = _make_pod_spec(container)
@@ -149,7 +178,6 @@ def launch_cronjob(ticker: str, schedule: str, extra_args=None, suspend: bool = 
     cron_spec = client.V1CronJobSpec(
         schedule=schedule,
         suspend=suspend,
-        # Avoid overlapping runs if a previous run is still executing
         concurrency_policy="Forbid",
         successful_jobs_history_limit=1,
         failed_jobs_history_limit=3,
@@ -165,8 +193,7 @@ def launch_cronjob(ticker: str, schedule: str, extra_args=None, suspend: bool = 
 
     # Create or replace
     try:
-        existing = batch.read_namespaced_cron_job(name=name, namespace=NAMESPACE)
-        # If we get here, replace it
+        batch.read_namespaced_cron_job(name=name, namespace=NAMESPACE)
         batch.replace_namespaced_cron_job(name=name, namespace=NAMESPACE, body=cron)
     except client.exceptions.ApiException as e:
         if e.status == 404:
