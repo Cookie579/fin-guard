@@ -13,8 +13,12 @@ spec:
         app: ingest-sec-go
     spec:
       serviceAccountName: {{ .Values.serviceAccount.name }}
+      # Use the imagePullSecrets defined in values.yaml. This allows the
+      # orchestrator pod to pull from private registries such as GHCR.
       imagePullSecrets:
-        - name: ghcr-creds 
+        {{- range .Values.imagePullSecrets }}
+        - name: {{ .name }}
+        {{- end }}
       containers:
         - name: ingest-sec-go
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
