@@ -31,3 +31,9 @@ Thumbs.db
 *.log
 
 
+# Extra
+ingest-social-go-local/
+filing-extractor/
+esg-content/
+
+

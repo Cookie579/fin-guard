@@ -54,25 +54,36 @@ func main() {
             }
         }
         if cik == "" {
-            // Not found in table or DynamoDB unavailable, fetch from SEC list.
-            var err error
-            cik, name, err = FetchCIKFromRemote(ctx, ticker)
-            if err != nil {
-                // If the remote CIK lookup fails (e.g. due to network issues or
-                // the ticker not being present in the SEC data set) we no
-                // longer abort the program. Instead we log a warning and
-                // terminate early without emitting any filings. This ensures
-                // the one‑off Job completes successfully even when external
-                // services are unreachable. Exit code 0 signals success to
-                // Kubernetes so the CronJob controller does not mark the
-                // execution as failed.
-                log.Printf("⚠️ Failed to resolve CIK for %s: %v; skipping filings", ticker, err)
-                return
-            }
-            // Persist the mapping so future runs do not need to fetch again.
-            if cikStore != nil {
-                if err := cikStore.PutCIK(ctx, ticker, cik, name); err != nil {
-                    log.Printf("⚠️ Failed to save CIK mapping for %s: %v", ticker, err)
+            // Not found in table or DynamoDB unavailable: attempt to resolve
+            // the CIK by downloading the full company_tickers.json file. This
+            // file contains mappings of tickers to CIK and company title. If
+            // the lookup succeeds we save the result back into DynamoDB. If
+            // it fails (e.g. due to network issues) we fall back to the
+            // previous remote lookup method. Any failure in both sources
+            // results in a graceful exit without emitting filings.
+            if cik2, name2, err := FetchCIKFromTickerJSON(ctx, ticker); err == nil {
+                cik, name = cik2, name2
+                if cikStore != nil {
+                    if err := cikStore.PutCIK(ctx, ticker, cik, name); err != nil {
+                        log.Printf("⚠️ Failed to save CIK mapping for %s: %v", ticker, err)
+                    }
+                }
+            } else {
+                // Log the error from the JSON fetch but continue to attempt
+                // resolution via the remote endpoint.
+                log.Printf("⚠️ Could not fetch CIK from ticker list for %s: %v", ticker, err)
+                var err2 error
+                cik, name, err2 = FetchCIKFromRemote(ctx, ticker)
+                if err2 != nil {
+                    // If both lookups fail we exit early. Use a warning instead of
+                    // fatal to ensure the process exits with code 0.
+                    log.Printf("⚠️ Failed to resolve CIK for %s via remote lookup: %v; skipping filings", ticker, err2)
+                    return
+                }
+                if cikStore != nil {
+                    if err := cikStore.PutCIK(ctx, ticker, cik, name); err != nil {
+                        log.Printf("⚠️ Failed to save CIK mapping for %s: %v", ticker, err)
+                    }
                 }
             }
         }
