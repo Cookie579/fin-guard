@@ -57,15 +57,14 @@ def _make_container(ticker: str, extra_args=None) -> client.V1Container:
 
     env = [
         client.V1EnvVar(name="AWS_REGION", value=AWS_REGION),
-        # If you wired a Secret for SEC UA, uncomment and ensure the Secret exists:
-        # client.V1EnvVar(
-        #     name="SEC_HTTP_UA",
-        #     value_from=client.V1EnvVarSource(
-        #         secret_key_ref=client.V1SecretKeySelector(
-        #             name="sec-http-ua", key="SEC_HTTP_UA", optional=True
-        #         )
-        #     ),
-        # ),
+        client.V1EnvVar(
+            name="SEC_HTTP_UA",
+            value_from=client.V1EnvVarSource(
+                secret_key_ref=client.V1SecretKeySelector(
+                    name="sec-http-ua", key="SEC_HTTP_UA", optional=True
+                )
+            ),
+        ),
     ]
 
     return client.V1Container(
