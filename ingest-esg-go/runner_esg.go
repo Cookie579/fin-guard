@@ -34,19 +34,26 @@ func RunESGJob(ctx context.Context, jobID, ingestDate, ticker string, args *esgA
     // Load companies.json and find the requested ticker. We assume
     // companies.json exists alongside the binary. If multiple entries
     // exist for the same ticker (unlikely) the first is used.
-    companies, err := LoadCompanies("companies.json")
-    if err != nil {
-        return fmt.Errorf("load companies.json: %w", err)
-    }
+    // Load companies.json to map tickers to company names. If the file
+    // cannot be loaded or the ticker is not found we fall back to
+    // using the ticker itself as the company name. This preserves
+    // backwards compatibility but allows clients to omit companies.json
+    // when launching jobs via the orchestrator.
     var company *Company
-    for i := range companies {
-        if strings.EqualFold(companies[i].Ticker, ticker) {
-            company = &companies[i]
-            break
+    if comps, err := LoadCompanies("companies.json"); err == nil {
+        for i := range comps {
+            if strings.EqualFold(comps[i].Ticker, ticker) {
+                company = &comps[i]
+                break
+            }
         }
     }
+    // Fallback: synthesise a company using the ticker as its name. This
+    // allows the ingest to proceed even when companies.json is absent or
+    // the ticker is unknown. The Ticker is always upper‑cased.
     if company == nil {
-        return fmt.Errorf("ticker %s not found in companies.json", ticker)
+        company = &Company{Name: ticker, Ticker: ticker}
+        log.Printf("ℹ️ using ticker %s as company name", ticker)
     }
     // Load the blacklist if specified. Absence of the file is not fatal.
     blacklist := map[string]struct{}{}

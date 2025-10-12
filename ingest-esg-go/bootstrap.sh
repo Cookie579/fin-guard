@@ -10,7 +10,8 @@ set -euo pipefail
 
 # Application root inside the container
 APP_ROOT="/app"
-GO_MAIN_DIR="${APP_ROOT}/ingest-esg-go"
+# The Go code resides in a nested ingest-esg-go/ingest-esg-go directory
+GO_MAIN_DIR="${APP_ROOT}/ingest-esg-go/ingest-esg-go"
 BIN_DIR="${APP_ROOT}/bin"
 BIN_PATH="${BIN_DIR}/ingest-esg-go"
 
@@ -29,7 +30,7 @@ if [[ ! -s "${BIN_PATH}" ]]; then
   cd "${APP_ROOT}"
   # Build with -trimpath and stripped symbols to reduce binary size
   /usr/local/go/bin/go build -trimpath -ldflags "-s -w" \
-    -o "${BIN_PATH}" ./ingest-esg-go
+    -o "${BIN_PATH}" ./ingest-esg-go/ingest-esg-go
   echo "✅ Built ${BIN_PATH}"
 fi
 
