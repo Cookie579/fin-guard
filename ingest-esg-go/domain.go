@@ -7,6 +7,7 @@ package main
 // together. See FindDomain for the primary entry point.
 
 import (
+    "context"
     "encoding/json"
     "fmt"
     "net/url"
@@ -40,6 +41,8 @@ func domainS3Key(ticker string, t time.Time) string {
 func FindDomain(c Company, cfg *Config) (*DomainEntry, bool, error) {
     now := time.Now().UTC()
     key := domainS3Key(c.Ticker, now)
+    // Check if today's domain file already exists in S3.  If so we
+    // honour the existing entry and skip any further work.
     exists, err := CheckIfExists(DOMAIN_BUCKET, key)
     if err != nil {
         return nil, false, fmt.Errorf("S3 head: %w", err)
@@ -48,6 +51,40 @@ func FindDomain(c Company, cfg *Config) (*DomainEntry, bool, error) {
         fmt.Printf("📁 %s exists — skip\n", key)
         return nil, true, nil
     }
+
+    // Attempt to fetch a cached domain from DynamoDB before issuing a
+    // new Google search.  If the domain exists in the cache we still
+    // write out an S3 record for today's date but avoid the external
+    // API call.  Any errors while contacting DynamoDB are silently
+    // ignored and fall through to the search path.
+    var ddbStore *DomainDDBStore
+    ctx := context.Background()
+    if s, derr := NewDomainDDBStore(ctx); derr == nil {
+        ddbStore = s
+        if cached, ferr := s.GetDomain(ctx, c.Ticker); ferr == nil && cached != "" {
+            entry := &DomainEntry{
+                Company:  c.Name,
+                Ticker:   c.Ticker,
+                Domain:   cached,
+                Source:   "DOMAIN",
+                IngestTS: now.Format(time.RFC3339),
+            }
+            // Persist the cached domain to S3 for today's key and emit to Kinesis
+            if err := PutDomainToS3(DOMAIN_BUCKET, key, entry); err != nil {
+                return nil, false, fmt.Errorf("S3 put: %w", err)
+            }
+            fmt.Printf("✅ uploaded s3://%s/%s\n", DOMAIN_BUCKET, key)
+            if err := SendDomainToStream(cfg.ReferenceStream, entry); err != nil {
+                fmt.Printf("⚠️ Kinesis push failed: %v\n", err)
+            }
+            return entry, false, nil
+        }
+    }
+
+    // No cached domain or DDB unavailable: perform a Google Custom
+    // Search to infer the domain.  We construct a query combining
+    // the company name and "official site".  If the API call
+    // fails or returns no valid domain the error is returned.
     query := fmt.Sprintf("%s official site", c.Name)
     results, err := GoogleSearch(query, cfg)
     if err != nil {
@@ -70,12 +107,20 @@ func FindDomain(c Company, cfg *Config) (*DomainEntry, bool, error) {
         Source:   "DOMAIN",
         IngestTS: now.Format(time.RFC3339),
     }
+    // Save the discovered domain to S3 and emit to Kinesis
     if err := PutDomainToS3(DOMAIN_BUCKET, key, entry); err != nil {
         return nil, false, fmt.Errorf("S3 put: %w", err)
     }
     fmt.Printf("✅ uploaded s3://%s/%s\n", DOMAIN_BUCKET, key)
     if err := SendDomainToStream(cfg.ReferenceStream, entry); err != nil {
         fmt.Printf("⚠️ Kinesis push failed: %v\n", err)
+    }
+    // Persist the domain to DynamoDB for future lookups if the
+    // store is available.  Errors are logged but not fatal.
+    if ddbStore != nil {
+        if err := ddbStore.PutDomain(ctx, c.Ticker, c.Name, host); err != nil {
+            fmt.Printf("⚠️ DDB put domain %s: %v\n", c.Ticker, err)
+        }
     }
     return entry, false, nil
 }

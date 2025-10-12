@@ -31,6 +31,18 @@ type YouTubeLimits struct {
 	MaxInflight int     `json:"max_inflight"`
 }
 
+// SerperLimits holds rate limiting settings for the Serper API (google.serper.dev).
+// These values mirror the settings for other RapidAPI-backed endpoints but
+// default to more conservative quotas.  When fields are zero or empty in
+// config.json, helper functions will supply reasonable defaults.  See
+// GetSerperRate for defaults.
+type SerperLimits struct {
+    Host        string  `json:"host"`         // e.g. "google.serper.dev"
+    RatePerSec  float64 `json:"rate_per_sec"` // requests per second
+    Burst       int     `json:"burst"`        // token bucket burst size
+    MaxInflight int     `json:"max_inflight"` // concurrent requests per key
+}
+
 // BrokerConfig groups Redis connection information and per-API rate limit
 // settings.  A new Youtube section has been added to allow configuring
 // the RapidAPI YouTube proxy.  If the Youtube section is omitted or
@@ -40,6 +52,12 @@ type BrokerConfig struct {
 	RedisAddr  string           `json:"redis_addr"` // e.g. "redis:6379"
 	Stocktwits StocktwitsLimits `json:"stocktwits"`
 	Youtube    YouTubeLimits    `json:"youtube"`
+    // Serper holds rate limit settings for the Serper API.  This
+    // section allows configuring the host and rate limits for
+    // google.serper.dev.  Fields may be omitted; helper functions will
+    // provide sane defaults.  See GetSerperHost and GetSerperRate for
+    // defaults.
+    Serper     SerperLimits     `json:"serper"`
 }
 
 type Config struct {
@@ -49,6 +67,13 @@ type Config struct {
 	AWSRegion      string       `json:"aws_region"`
 	Stocktwitkeys  []string     `json:"stocktwit_keys"`
 	YouTubeAPIKeys []string     `json:"youtube_keys"`
+    // SerperAPIKeys holds one or more API tokens for the Serper API.
+    // These keys are used to call google.serper.dev via the rate
+    // broker.  When empty, the broker will attempt to load keys
+    // from the SERPER_API_KEYS environment variable instead.  If
+    // neither source provides keys the Serper API will not be
+    // registered.
+    SerperAPIKeys []string     `json:"serper_keys"`
 	Broker         BrokerConfig `json:"broker"`
 }
 
@@ -176,6 +201,53 @@ func Loadyoutubekeys() ([]string, error) {
 		return []string{}, nil
 	}
 	return dedupeTrim(cfg.YouTubeAPIKeys), nil
+}
+
+// Loadserperkeys loads API keys for the Serper API from config.json.  It
+// trims whitespace and deduplicates entries.  An empty slice is
+// returned if no keys are present.  Errors are returned only when
+// config loading fails.
+func Loadserperkeys() ([]string, error) {
+    cfg, err := LoadConfig()
+    if err != nil {
+        return nil, err
+    }
+    if len(cfg.SerperAPIKeys) == 0 {
+        return []string{}, nil
+    }
+    return dedupeTrim(cfg.SerperAPIKeys), nil
+}
+
+// GetSerperHost returns the configured Serper API host.  If the host
+// field is empty in the loaded configuration, a default of
+// "google.serper.dev" is returned.  This helper allows older
+// config files to omit the broker.serper.host field entirely.
+func GetSerperHost(cfg Config) string {
+    if h := strings.TrimSpace(cfg.Broker.Serper.Host); h != "" {
+        return h
+    }
+    return "google.serper.dev"
+}
+
+// GetSerperRate returns the rate limiting settings for the Serper API.
+// If values are zero or negative in the loaded configuration, sane
+// defaults are applied: ratePerSec = 0.277778 (approx. 1000 requests
+// per hour), burst = 10, maxInflight = 1.  These defaults mirror the
+// rapidapi quotas used for other APIs in the broker.
+func GetSerperRate(cfg Config) (rate float64, burst, maxInflight int) {
+    rate = cfg.Broker.Serper.RatePerSec
+    if rate <= 0 {
+        rate = 0.2777778
+    }
+    burst = cfg.Broker.Serper.Burst
+    if burst <= 0 {
+        burst = 10
+    }
+    maxInflight = cfg.Broker.Serper.MaxInflight
+    if maxInflight <= 0 {
+        maxInflight = 1
+    }
+    return
 }
 
 func dedupeTrim(in []string) []string {

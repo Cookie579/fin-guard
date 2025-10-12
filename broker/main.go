@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -83,88 +84,148 @@ func waitForRedis(ctx context.Context, rdb *redis.Client) {
 }
 
 func newServer() *Server {
-    // Load file-backed config (no envs)
-    cfg, err := LoadConfig()
-    if err != nil {
-        log.Fatalf("load config.json: %v", err)
-    }
+	// Load file-backed config (no envs)
+	cfg, err := LoadConfig()
+	if err != nil {
+		log.Fatalf("load config.json: %v", err)
+	}
 
-    // Redis client (addr should be "127.0.0.1:6379" for sidecar or a real endpoint)
-    rdb := redis.NewClient(&redis.Options{
-        Addr: GetRedisAddr(cfg),
-        DB:   0,
-    })
-    // Wait (with backoff) until Redis responds
-    waitForRedis(context.Background(), rdb)
+	// Redis client (addr should be "127.0.0.1:6379" for sidecar or a real endpoint)
+	rdb := redis.NewClient(&redis.Options{
+		Addr: GetRedisAddr(cfg),
+		DB:   0,
+	})
+	// Wait (with backoff) until Redis responds
+	waitForRedis(context.Background(), rdb)
 
-    // Build API configurations dynamically.  We always register Stocktwits.
-    apis := make(map[string]*APIConfig)
+	// Build API configurations dynamically.  We always register Stocktwits.
+	apis := make(map[string]*APIConfig)
 
-    // --- STOCKTWITS ---
-    stHost := GetStocktwitsHost(cfg)                // default "stocktwits.p.rapidapi.com"
-    stRate, stBurst, stMaxInf := GetStocktwitsRate(cfg) // defaults 0.2777778, 10, 1
-    stKeys, err := Loadstocktwitkeys()              // required: config.json.stocktwit_keys
-    if err != nil || len(stKeys) == 0 {
-        log.Fatalf("rapidapi keys (stocktwit_keys): %v", err)
-    }
-    apis["stocktwits"] = &APIConfig{
-        Name:        "stocktwits",
-        Host:        stHost,
-        RatePerSec:  stRate,
-        Burst:       stBurst,
-        MaxInflight: stMaxInf,
-        Keys:        stKeys,
-    }
+	// --- STOCKTWITS ---
+	stHost := GetStocktwitsHost(cfg)                    // default "stocktwits.p.rapidapi.com"
+	stRate, stBurst, stMaxInf := GetStocktwitsRate(cfg) // defaults 0.2777778, 10, 1
+	stKeys, err := Loadstocktwitkeys()                  // required: config.json.stocktwit_keys
+	if err != nil || len(stKeys) == 0 {
+		log.Fatalf("rapidapi keys (stocktwit_keys): %v", err)
+	}
+	apis["stocktwits"] = &APIConfig{
+		Name:        "stocktwits",
+		Host:        stHost,
+		RatePerSec:  stRate,
+		Burst:       stBurst,
+		MaxInflight: stMaxInf,
+		Keys:        stKeys,
+	}
 
-    // --- YOUTUBE ---
-    // Determine if YouTube should be registered.  If the host is empty, we skip.
-    ytHost := GetYouTubeHost(cfg)
-    if strings.TrimSpace(ytHost) != "" {
-        ytRate, ytBurst, ytMaxInf := GetYouTubeRate(cfg)
-        ytKeys, ytErr := Loadyoutubekeys() // optional; may be empty
-        if ytErr != nil {
-            // Log as warning; fallback will happen below if keys empty
-            log.Printf("WARN: youtube_keys load error: %v (will try fallback to stocktwit_keys)", ytErr)
-        }
-        if len(ytKeys) == 0 {
-            ytKeys = stKeys
-            log.Printf("youtube_keys not provided; falling back to stocktwit_keys (%d key(s))", len(ytKeys))
-        }
-        if len(ytKeys) == 0 {
-            log.Printf("no RapidAPI keys available for youtube; 'youtube' API will not be registered")
-        } else {
-            apis["youtube"] = &APIConfig{
-                Name:        "youtube",
-                Host:        ytHost,
-                RatePerSec:  ytRate,
-                Burst:       ytBurst,
-                MaxInflight: ytMaxInf,
-                Keys:        ytKeys,
-            }
-        }
-    } else {
-        log.Printf("youtube host not configured; 'youtube' API will not be available")
-    }
+	// --- YOUTUBE ---
+	// Determine if YouTube should be registered.  If the host is empty, we skip.
+	ytHost := GetYouTubeHost(cfg)
+	if strings.TrimSpace(ytHost) != "" {
+		ytRate, ytBurst, ytMaxInf := GetYouTubeRate(cfg)
+		ytKeys, ytErr := Loadyoutubekeys() // optional; may be empty
+		if ytErr != nil {
+			// Log as warning; fallback will happen below if keys empty
+			log.Printf("WARN: youtube_keys load error: %v (will try fallback to stocktwit_keys)", ytErr)
+		}
+		if len(ytKeys) == 0 {
+			ytKeys = stKeys
+			log.Printf("youtube_keys not provided; falling back to stocktwit_keys (%d key(s))", len(ytKeys))
+		}
+		if len(ytKeys) == 0 {
+			log.Printf("no RapidAPI keys available for youtube; 'youtube' API will not be registered")
+		} else {
+			apis["youtube"] = &APIConfig{
+				Name:        "youtube",
+				Host:        ytHost,
+				RatePerSec:  ytRate,
+				Burst:       ytBurst,
+				MaxInflight: ytMaxInf,
+				Keys:        ytKeys,
+			}
+		}
+	} else {
+		log.Printf("youtube host not configured; 'youtube' API will not be available")
+	}
 
-    // Load Lua scripts
-    ctx := context.Background()
-    acqSHA, err := rdb.ScriptLoad(ctx, acquireLua).Result()
-    if err != nil {
-        log.Fatalf("load acquire script: %v", err)
-    }
-    repSHA, err := rdb.ScriptLoad(ctx, reportLua).Result()
-    if err != nil {
-        log.Fatalf("load report script: %v", err)
-    }
+	// --- SERPER ---
+	// Dynamically register the Serper API using either environment
+	// variables or config.json.  Environment variables take
+	// precedence: if SERPER_API_KEYS is set the broker uses those
+	// keys; otherwise it falls back to serper_keys in config.json.
+	// Host and rate limits are drawn from broker.serper in config.json
+	// but can be overridden via SERPER_HOST, SERPER_RATE_PER_SEC,
+	// SERPER_BURST and SERPER_MAX_INFLIGHT.  If no keys are found
+	// the Serper API will not be registered.
+	{
+		var serperKeys []string
+		raw := strings.TrimSpace(os.Getenv("SERPER_API_KEYS"))
+		if raw != "" {
+			for _, part := range strings.Split(raw, ",") {
+				if k := strings.TrimSpace(part); k != "" {
+					serperKeys = append(serperKeys, k)
+				}
+			}
+		} else {
+			if cfgKeys, err := Loadserperkeys(); err == nil {
+				serperKeys = cfgKeys
+			} else {
+				log.Printf("WARN: serper_keys load error: %v", err)
+			}
+		}
+		if len(serperKeys) > 0 {
+			// Determine host and defaults from config
+			serperHost := strings.TrimSpace(os.Getenv("SERPER_HOST"))
+			if serperHost == "" {
+				serperHost = GetSerperHost(cfg)
+			}
+			rate, burst, maxInf := GetSerperRate(cfg)
+			// env overrides
+			if v := strings.TrimSpace(os.Getenv("SERPER_RATE_PER_SEC")); v != "" {
+				if rv, err := strconv.ParseFloat(v, 64); err == nil && rv > 0 {
+					rate = rv
+				}
+			}
+			if v := strings.TrimSpace(os.Getenv("SERPER_BURST")); v != "" {
+				if iv, err := strconv.Atoi(v); err == nil && iv > 0 {
+					burst = iv
+				}
+			}
+			if v := strings.TrimSpace(os.Getenv("SERPER_MAX_INFLIGHT")); v != "" {
+				if iv, err := strconv.Atoi(v); err == nil && iv > 0 {
+					maxInf = iv
+				}
+			}
+			apis["serper"] = &APIConfig{
+				Name:        "serper",
+				Host:        serperHost,
+				RatePerSec:  rate,
+				Burst:       burst,
+				MaxInflight: maxInf,
+				Keys:        serperKeys,
+			}
+			log.Printf("registered serper API with %d key(s)", len(serperKeys))
+		}
+	}
 
-    return &Server{
-        rdb:      rdb,
-        apis:     apis,
-        acqSHA:   acqSHA,
-        repSHA:   repSHA,
-        rrKeyFmt: "rl:%s:rr",
-        keyFmt:   "rl:%s:%d",
-    }
+	// Load Lua scripts
+	ctx := context.Background()
+	acqSHA, err := rdb.ScriptLoad(ctx, acquireLua).Result()
+	if err != nil {
+		log.Fatalf("load acquire script: %v", err)
+	}
+	repSHA, err := rdb.ScriptLoad(ctx, reportLua).Result()
+	if err != nil {
+		log.Fatalf("load report script: %v", err)
+	}
+
+	return &Server{
+		rdb:      rdb,
+		apis:     apis,
+		acqSHA:   acqSHA,
+		repSHA:   repSHA,
+		rrKeyFmt: "rl:%s:rr",
+		keyFmt:   "rl:%s:%d",
+	}
 }
 
 func (s *Server) apiOrErr(name string) (*APIConfig, error) {

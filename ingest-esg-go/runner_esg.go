@@ -55,7 +55,10 @@ func RunESGJob(ctx context.Context, jobID, ingestDate, ticker string, args *esgA
         company = &Company{Name: ticker, Ticker: ticker}
         log.Printf("ℹ️ using ticker %s as company name", ticker)
     }
-    // Load the blacklist if specified. Absence of the file is not fatal.
+    // Load a blacklist either from a file (if provided) or from
+    // DynamoDB.  When args.Blacklist is empty we attempt to scan the
+    // ESG_BLACKLIST_TABLE.  If both lookups fail we proceed with an
+    // empty set.  Errors from DDB are logged but not fatal.
     blacklist := map[string]struct{}{}
     if args.Blacklist != "" {
         blk, err := LoadBlacklist(args.Blacklist)
@@ -64,6 +67,13 @@ func RunESGJob(ctx context.Context, jobID, ingestDate, ticker string, args *esgA
         } else {
             blacklist = blk
             log.Printf("🛡️ loaded %d blacklist domains", len(blacklist))
+        }
+    } else {
+        if blk, err := LoadBlacklistFromDDB(); err == nil {
+            blacklist = blk
+            log.Printf("🛡️ loaded %d blacklist domains from DDB", len(blacklist))
+        } else {
+            log.Printf("⚠️ failed to load blacklist from DDB: %v", err)
         }
     }
     // Domain discovery. If mode includes "domain" we run FindDomain to
