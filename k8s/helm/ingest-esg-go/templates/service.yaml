@@ -10,8 +10,9 @@ spec:
   selector:
     app.kubernetes.io/name: {{ include "ingest-esg-go.name" . }}
     app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: orchestrator
   ports:
     - name: http
       port: {{ .Values.service.port }}
-      targetPort: 8080
+      targetPort: 8081
       protocol: TCP

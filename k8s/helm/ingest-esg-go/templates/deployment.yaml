@@ -5,29 +5,65 @@ metadata:
   labels:
     app.kubernetes.io/name: {{ include "ingest-esg-go.name" . }}
     app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: orchestrator
 spec:
-  replicas: {{ .Values.replicaCount }}
+  replicas: {{ .Values.replicaCount | default 1 }}
+  revisionHistoryLimit: 3
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "ingest-esg-go.name" . }}
       app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: orchestrator
   template:
     metadata:
       labels:
         app.kubernetes.io/name: {{ include "ingest-esg-go.name" . }}
         app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: orchestrator
     spec:
       serviceAccountName: {{ .Values.serviceAccount.name }}
-      {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+        - name: {{ .Values.runner.imagePullSecret | default "ghcr-creds" | quote }}
       containers:
-        - name: {{ include "ingest-esg-go.name" . }}
+        - name: app
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          imagePullPolicy: {{ .Values.image.pullPolicy | default "Always" }}
+          # Force-run the FastAPI orchestrator via bootstrap even if image entrypoint changes
+          command: ["/bin/bash", "/app/bootstrap.sh"]
+          args: []
           ports:
-            - containerPort: 8080
+            - name: http
+              containerPort: 8081
+          env:
+            - name: RUNNER_IMAGE
+              value: {{ (printf "%s:%s" .Values.image.repository .Values.image.tag) | quote }}
+            - name: RUNNER_SERVICEACCOUNT
+              value: {{ default .Values.serviceAccount.name .Values.runner.serviceAccountName | quote }}
+            - name: IMAGE_PULL_SECRET
+              value: {{ .Values.runner.imagePullSecret | quote }}
+            - name: AWS_REGION
+              value: {{ .Values.aws.region | default "us-east-1" | quote }}
+            - name: CONFIG_SECRET
+              value: {{ .Values.configSecret | default "preprocess-config" | quote }}
+            - name: RATE_BROKER_URL
+              value: "http://rate-broker.default.svc.cluster.local:8080"
+            - name: ESG_DDB_TABLE
+              value: {{ .Values.ddb.table | quote }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          readinessProbe:
+            httpGet: { path: "/", port: 8081 }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 6
+          livenessProbe:
+            httpGet: { path: "/", port: 8081 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
           {{- with .Values.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
@@ -38,5 +74,5 @@ spec:
           {{- end }}
       {{- with .Values.extraVolumes }}
       volumes:
-        {{- toYaml . | nindent 8 }}
+        {{- toYaml . | nindent 6 }}
       {{- end }}

@@ -1,31 +1,71 @@
+# Default values for the ingest-esg-go chart.
+# These values configure both the orchestrator Deployment and the worker
+# Jobs launched by the orchestrator. Adjust as necessary for your
+# environment (e.g. pin image tags, set a roleArn, or supply extra
+# environment variables).
+
 replicaCount: 1
 
 image:
+  # Repository and tag for the orchestrator image (Python + FastAPI + bootstrap)
   repository: ghcr.io/cookie579/ingest-esg-go
   tag: latest
   pullPolicy: Always
 
 service:
   type: ClusterIP
-  port: 8080
-
-imagePullSecrets:
-  - name: ghcr-creds
+  port: 8081
 
 serviceAccount:
-  name: preprocess-python-sa
+  # Name of the ServiceAccount used by the orchestrator Deployment and also
+  # supplied to Jobs launched by the orchestrator (via RUNNER_SERVICEACCOUNT).
+  name: ingest-esg-go
+  # AWS IAM role ARN to use when running in EKS. Leave as an empty
+  # string if not using IRSA. The Helm template will always emit the
+  # annotation as a quoted string to satisfy ArgoCD.
   roleArn: arn:aws:iam::084071638445:role/preprocess-irsa-role
-  annotations:
-    eks.amazonaws.com/role-arn: arn:aws:iam::084071638445:role/preprocess-irsa-role
+  # Additional annotations can be added here. They will be merged
+  # alongside the role annotation.
+  annotations: {}
+
+runner:
+  # Docker image for the Go worker launched by the orchestrator. This
+  # should match the tag built from Dockerfile. Pin to a SHA or version
+  # tag to avoid upgrades breaking running Jobs.
+  image: ghcr.io/cookie579/ingest-esg-go:latest
+  # ServiceAccount for the worker Jobs. Defaults to the same SA as the
+  # orchestrator but can be overridden if using separate IAM roles.
+  serviceAccountName: ingest-esg-go
+  # Name of the imagePullSecret used to pull both orchestrator and runner
+  # images from private registries such as GHCR. You must create this
+  # secret in the target namespace prior to deploying the chart.
+  imagePullSecret: ghcr-creds
+
+# Name of the Kubernetes Secret containing config.json. Worker pods mount
+# this secret at /app/config.json so the Go collectors can read API keys.
+# If you change this, also update the name of the Secret you create in
+# your cluster (see k8s/argocd/preprocess-config.yaml or equivalent).
+configSecret: preprocess-config
+
+aws:
+  # AWS region for the worker Jobs. This sets the AWS_REGION env var on
+  # the worker. The region is not read from config.json – it is defined
+  # here to keep infra configuration out of the API key file.
+  region: us-east-1
+
+# DynamoDB table for ESG deduplication. This is supplied to the worker via
+# the ESG_DDB_TABLE environment variable. Adjust if your table name
+# differs.
+ddb:
+  table: fin-guard-esg-seen
 
 resources: {}
 
-extraVolumes:
-  - name: config-volume
-    secret:
-      secretName: preprocess-config
+# Extra environment variables for the orchestrator container (optional).
+#extraEnv:
+#  - name: SOME_ENV
+#    value: "some-value"
 
-extraVolumeMounts:
-  - name: config-volume
-    mountPath: /app/config.json
-    subPath: config.json
+# Additional volumes and mounts for the orchestrator container (optional).
+extraVolumes: []
+extraVolumeMounts: []
