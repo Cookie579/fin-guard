@@ -59,8 +59,14 @@ type Config struct {
     GoogleSearchCX  string `json:"google_cx"`
     KinesisStream   string `json:"kinesis_stream"`
     AWSRegion       string `json:"aws_region"`
-    SerperAPIKey    string `json:"serper_api_key"`
-    ReferenceStream string `json:"reference_stream"`
+    // SerperAPIKey holds a single API key for Serper searches. It is kept for
+    // backward compatibility when only one key is provided. When multiple
+    // keys are supplied the SerperKeys slice will be populated instead.
+    SerperAPIKey    string   `json:"serper_api_key"`
+    // SerperKeys allows specifying multiple Serper API keys. When present the
+    // first non-empty key will be used for searches if SerperAPIKey is empty.
+    SerperKeys      []string `json:"serper_keys"`
+    ReferenceStream string   `json:"reference_stream"`
 }
 
 // LoadConfig attempts to read configuration from a small number of

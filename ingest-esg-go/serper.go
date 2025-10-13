@@ -87,13 +87,58 @@ func SearchESGLinks(company string, cfg *Config) ([]SearchItem, error) {
         "climate report",
         "DEI report",
     }
-    // Helper to issue one Serper API request via the broker
+    // Helper to issue one Serper API request. It first attempts to
+    // acquire a permit from the broker and call the API using the
+    // returned key. If the broker returns an "unknown api" error it
+    // falls back to calling Serper directly using the API key from
+    // config. The function returns the parsed response, HTTP status
+    // code, raw body and any error encountered.
     post := func(body any) (*serperResp, int, []byte, error) {
         b, _ := json.Marshal(body)
+        // Attempt to acquire a permit from the rate broker.
         lease, err := acquirePermit(ctx, "serper")
         if err != nil {
+            // If the broker doesn't recognise the API name, fall back to a
+            // direct Serper API call using our own key. The broker wraps its
+            // error strings with context, so perform a substring match.
+            if strings.Contains(err.Error(), "unknown api") {
+                // Select API key from config. Prefer SerperAPIKey, then
+                // fallback to the first entry in SerperKeys.
+                key := strings.TrimSpace(cfg.SerperAPIKey)
+                if key == "" && len(cfg.SerperKeys) > 0 {
+                    key = strings.TrimSpace(cfg.SerperKeys[0])
+                }
+                if key == "" {
+                    // Without any key we cannot call the API.
+                    return nil, 0, nil, fmt.Errorf("broker acquire: %w", err)
+                }
+                req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://google.serper.dev/search", bytes.NewReader(b))
+                req.Header.Set("Content-Type", "application/json")
+                req.Header.Set("X-API-KEY", key)
+                var status int
+                var raw []byte
+                resp, doErr := client.Do(req)
+                if resp != nil {
+                    status = resp.StatusCode
+                    raw, _ = io.ReadAll(resp.Body)
+                    resp.Body.Close()
+                }
+                if doErr != nil {
+                    return nil, status, raw, doErr
+                }
+                if status >= 300 {
+                    return nil, status, raw, fmt.Errorf("serper.dev HTTP %d: %s", status, strings.TrimSpace(string(raw)))
+                }
+                var out serperResp
+                if err := json.Unmarshal(raw, &out); err != nil {
+                    return nil, status, raw, err
+                }
+                return &out, status, raw, nil
+            }
+            // Propagate other errors from the broker.
             return nil, 0, nil, fmt.Errorf("broker acquire: %w", err)
         }
+        // With a broker lease, call the API using the provided key.
         req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://google.serper.dev/search", bytes.NewReader(b))
         req.Header.Set("Content-Type", "application/json")
         req.Header.Set("X-API-KEY", lease.Key)
@@ -108,6 +153,7 @@ func SearchESGLinks(company string, cfg *Config) ([]SearchItem, error) {
             resp.Body.Close()
         }
         ok := (doErr == nil && status < 300)
+        // Always report the result back to the broker.
         reportResult(ctx, lease.ID, ok, status, retryAfterMs)
         if doErr != nil {
             return nil, status, raw, doErr

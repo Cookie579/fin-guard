@@ -43,8 +43,18 @@ type GoogleSearchResponse struct {
 // error the function returns a descriptive message.  The caller is
 // responsible for handling empty result sets.
 func GoogleSearch(query string, cfg *Config) (*GoogleSearchResponse, error) {
-    // Validate that a Serper API key has been provided in config.json.
-    if cfg == nil || strings.TrimSpace(cfg.SerperAPIKey) == "" {
+    // Determine which Serper API key to use. Prefer the singular
+    // SerperAPIKey when set; otherwise fall back to the first entry in
+    // SerperKeys. Trim whitespace to avoid accidental spaces from
+    // config files.
+    if cfg == nil {
+        return nil, fmt.Errorf("Serper API key is missing in config")
+    }
+    key := strings.TrimSpace(cfg.SerperAPIKey)
+    if key == "" && len(cfg.SerperKeys) > 0 {
+        key = strings.TrimSpace(cfg.SerperKeys[0])
+    }
+    if key == "" {
         return nil, fmt.Errorf("Serper API key is missing in config")
     }
     // Prepare the JSON payload for the Serper API.  Request up to 10
@@ -58,7 +68,7 @@ func GoogleSearch(query string, cfg *Config) (*GoogleSearchResponse, error) {
         return nil, fmt.Errorf("failed to create Serper request: %w", err)
     }
     req.Header.Set("Content-Type", "application/json")
-    req.Header.Set("X-API-KEY", strings.TrimSpace(cfg.SerperAPIKey))
+    req.Header.Set("X-API-KEY", key)
     client := &http.Client{Timeout: 20 * time.Second}
     fmt.Println("🔍 Serper search query:", query)
     resp, err := client.Do(req)
