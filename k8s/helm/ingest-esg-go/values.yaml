@@ -57,7 +57,19 @@ aws:
 # the ESG_DDB_TABLE environment variable. Adjust if your table name
 # differs.
 ddb:
+  # Primary DynamoDB table for ESG URL deduplication (partition key pk
+  # and sort key sk).  The worker will use this table via
+  # ESG_DDB_TABLE.  Additional tables for domain caching and
+  # blacklist storage can be configured below.
   table: fin-guard-esg-seen
+  # DynamoDB table for caching discovered domains.  The worker reads
+  # and writes company domains in this table.  If unset the default
+  # "fin-guard-esg-domain" is used.
+  domainTable: fin-guard-esg-domain
+  # DynamoDB table for storing blacklist domains.  The worker will
+  # load domains from this table when the blacklist flag is blank.  If
+  # unset the default "fin-guard-esg-blacklist" is used.
+  blacklistTable: fin-guard-esg-blacklist
 
 resources: {}
 

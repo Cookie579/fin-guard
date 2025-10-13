@@ -49,6 +49,10 @@ spec:
               value: "http://rate-broker.default.svc.cluster.local:8080"
             - name: ESG_DDB_TABLE
               value: {{ .Values.ddb.table | quote }}
+            - name: ESG_DOMAIN_DDB_TABLE
+              value: {{ .Values.ddb.domainTable | quote }}
+            - name: ESG_BLACKLIST_TABLE
+              value: {{ .Values.ddb.blacklistTable | quote }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

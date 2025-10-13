@@ -62,7 +62,12 @@ func main() {
         fs.StringVar(&args.Mode, "mode", "esg+domain", "Run mode: domain | esg | esg+domain")
         fs.StringVar(&args.Bucket, "bucket", "fin-processed-esg-reports", "S3 bucket for JSON output")
         fs.StringVar(&args.Stream, "stream", "", "Kinesis stream for link records (optional; if empty uses config.json)")
-        fs.StringVar(&args.Blacklist, "blacklist", "blacklist.txt", "Path to blacklist file")
+        // Note: default blacklist path is blank so that the ingest uses the
+        // DynamoDB‑backed blacklist automatically.  When a path is
+        // explicitly provided, the worker will attempt to load that file
+        // instead.  Previously this default pointed to "blacklist.txt",
+        // which caused the worker to error out if no file was mounted.
+        fs.StringVar(&args.Blacklist, "blacklist", "", "Path to blacklist file (leave blank to use DDB)")
         fs.IntVar(&args.Concurrency, "concurrency", 1, "Number of tickers to process in parallel")
         fs.StringVar(&args.Region, "region", os.Getenv("AWS_REGION"), "AWS region override (optional)")
         fs.Usage = func() {
