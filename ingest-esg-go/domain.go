@@ -1,10 +1,10 @@
 package main
 
 // domain.go contains functionality for discovering a company's official
-// website using Google Custom Search and persisting the result to S3
-// and Kinesis. It mirrors the original utils/domain.go implementation
-// but lives in the top‑level package so that all code compiles
-// together. See FindDomain for the primary entry point.
+// website using the Serper search API and persisting the result to S3
+// and Kinesis.  It mirrors the original utils/domain.go implementation
+// but now uses Serper instead of Google Custom Search.  See
+// FindDomain for the primary entry point.
 
 import (
     "context"
@@ -85,11 +85,12 @@ func FindDomain(c Company, cfg *Config) (*DomainEntry, bool, error) {
         fmt.Printf("📁 %s exists — skip\n", key)
         return nil, true, nil
     }
-    // Perform a Google Custom Search to find the domain
+    // Perform a Serper search to find the domain.  The query asks for
+    // the company's official site and relies on cfg.SerperAPIKey.
     query := fmt.Sprintf("%s official site", c.Name)
     results, err := GoogleSearch(query, cfg)
     if err != nil {
-        return nil, false, fmt.Errorf("google: %w", err)
+        return nil, false, fmt.Errorf("serper: %w", err)
     }
     var host string
     for _, it := range results.Items {

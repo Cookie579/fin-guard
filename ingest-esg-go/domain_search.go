@@ -1,60 +1,93 @@
 package main
 
-// domain_search.go wraps the Google Custom Search API used for domain
-// discovery. It is identical to the original utils/domain_search.go
-// implementation but resides in the top‑level package for ease of
-// compilation.
+// domain_search.go wraps the Serper API used for domain
+// discovery. Previously this file relied on Google's Custom Search API
+// to locate a company's official website; it now uses the Serper
+// API (https://serper.dev).  The function defined below retains the
+// name GoogleSearch for backward compatibility but calls the Serper
+// endpoint instead.
 
 import (
+    "bytes"
     "encoding/json"
     "fmt"
     "io"
     "net/http"
-    "net/url"
+    "strings"
+    "time"
 )
 
-// GoogleSearchItem represents a single search result item from the
-// Google Custom Search API. Only title, link and snippet fields are
-// parsed. Additional fields in the JSON response are ignored.
+// GoogleSearchItem represents a single search result item.  In the
+// original implementation this struct described a result from the
+// Google Custom Search API; it is reused here for Serper results.
+// Only title, link and snippet fields are populated when decoding
+// responses.  Additional JSON fields are ignored.
 type GoogleSearchItem struct {
     Title   string `json:"title"`
     Link    string `json:"link"`
     Snippet string `json:"snippet"`
 }
 
-// GoogleSearchResponse wraps the items array returned by the Custom
-// Search API. An empty Items slice means no results were found.
+// GoogleSearchResponse wraps the items array returned by the search
+// provider.  Historically this was the Custom Search API response but
+// it now holds Serper results.  An empty Items slice means no
+// results were found.
 type GoogleSearchResponse struct {
     Items []GoogleSearchItem `json:"items"`
 }
 
-// GoogleSearch performs a programmable search using the Google Custom
-// Search API. It constructs the API URL from the query and the
-// provided Config values (API key and search CX). It returns a
-// parsed response or an error if the request fails or the response
-// cannot be decoded. The caller is responsible for handling
-// non‑existent items.
+// GoogleSearch performs a programmable search using the Serper API.  It
+// posts a JSON body containing the query to google.serper.dev/search and
+// returns the organic results.  The API key is read from
+// cfg.SerperAPIKey; Google API keys and CX values are ignored.  On
+// error the function returns a descriptive message.  The caller is
+// responsible for handling empty result sets.
 func GoogleSearch(query string, cfg *Config) (*GoogleSearchResponse, error) {
-    encodedQuery := url.QueryEscape(query)
-    apiURL := fmt.Sprintf(
-        "https://www.googleapis.com/customsearch/v1?q=%s&key=%s&cx=%s",
-        encodedQuery,
-        cfg.GoogleAPIKey,
-        cfg.GoogleSearchCX,
-    )
-    fmt.Println("🔍 Final Google Search URL:", apiURL)
-    resp, err := http.Get(apiURL)
+    // Validate that a Serper API key has been provided in config.json.
+    if cfg == nil || strings.TrimSpace(cfg.SerperAPIKey) == "" {
+        return nil, fmt.Errorf("Serper API key is missing in config")
+    }
+    // Prepare the JSON payload for the Serper API.  Request up to 10
+    // results which is sufficient for domain discovery.
+    body, _ := json.Marshal(map[string]any{
+        "q":   query,
+        "num": 10,
+    })
+    req, err := http.NewRequest(http.MethodPost, "https://google.serper.dev/search", bytes.NewReader(body))
     if err != nil {
-        return nil, fmt.Errorf("failed to call Google Search API: %w", err)
+        return nil, fmt.Errorf("failed to create Serper request: %w", err)
+    }
+    req.Header.Set("Content-Type", "application/json")
+    req.Header.Set("X-API-KEY", strings.TrimSpace(cfg.SerperAPIKey))
+    client := &http.Client{Timeout: 20 * time.Second}
+    fmt.Println("🔍 Serper search query:", query)
+    resp, err := client.Do(req)
+    if err != nil {
+        return nil, fmt.Errorf("failed to call Serper API: %w", err)
     }
     defer resp.Body.Close()
-    if resp.StatusCode != http.StatusOK {
-        bodyBytes, _ := io.ReadAll(resp.Body)
-        return nil, fmt.Errorf("non-200 from Google Search: %s\nBody: %s", resp.Status, string(bodyBytes))
+    if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+        data, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+        return nil, fmt.Errorf("Serper API HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
     }
-    var searchResults GoogleSearchResponse
-    if err := json.NewDecoder(resp.Body).Decode(&searchResults); err != nil {
-        return nil, fmt.Errorf("failed to parse search response: %w", err)
+    // Decode the Serper response.
+    var raw struct {
+        Organic []struct {
+            Title   string `json:"title"`
+            Link    string `json:"link"`
+            Snippet string `json:"snippet"`
+        } `json:"organic"`
     }
-    return &searchResults, nil
+    if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+        return nil, fmt.Errorf("failed to parse Serper response: %w", err)
+    }
+    out := &GoogleSearchResponse{Items: make([]GoogleSearchItem, 0, len(raw.Organic))}
+    for _, item := range raw.Organic {
+        out.Items = append(out.Items, GoogleSearchItem{
+            Title:   strings.TrimSpace(item.Title),
+            Link:    strings.TrimSpace(item.Link),
+            Snippet: strings.TrimSpace(item.Snippet),
+        })
+    }
+    return out, nil
 }

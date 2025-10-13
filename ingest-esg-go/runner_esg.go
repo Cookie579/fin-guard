@@ -19,8 +19,9 @@ import (
 // entire job. The args struct holds any user‑supplied overrides such
 // as S3 bucket, Kinesis stream or blacklist path.
 func RunESGJob(ctx context.Context, jobID, ingestDate, ticker string, args *esgArgs) error {
-    // Load configuration from config.json. The Config struct includes
-    // Google API keys, Serper API key (ignored here) and Kinesis stream.
+    // Load configuration from config.json.  The Config struct includes
+    // Google API keys (unused for domain discovery), a Serper API key
+    // and Kinesis stream settings.
     cfg, err := LoadConfig()
     if err != nil {
         return fmt.Errorf("load config: %w", err)
@@ -80,7 +81,7 @@ func RunESGJob(ctx context.Context, jobID, ingestDate, ticker string, args *esgA
     // ESG link scraping. If mode includes "esg" we query Serper via
     // the broker, deduplicate results and emit records to S3 and Kinesis.
     if args.Mode == "esg" || args.Mode == "esg+domain" {
-        log.Printf("🔍 Google ESG search for %s …", company.Name)
+        log.Printf("🔍 Serper ESG search for %s …", company.Name)
         results, err := SearchESGLinks(company.Name, cfg)
         if err != nil {
             log.Printf("search %s: %v", ticker, err)
