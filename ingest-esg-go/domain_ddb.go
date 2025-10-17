@@ -42,10 +42,10 @@ type DomainDDBStore struct {
 // credential chain.  It reads the target table name from
 // ESG_DOMAIN_DDB_TABLE or falls back to a sensible default when unset.
 func NewDomainDDBStore(ctx context.Context) (*DomainDDBStore, error) {
-    table := os.Getenv("ESG_DOMAIN_DDB_TABLE")
-    if table == "" {
-        table = "fin-guard-esg-domain"
-    }
+    // Do not rely on environment variables for the table name; use a
+    // sensible default directly. Environment variable ESG_DOMAIN_DDB_TABLE
+    // is ignored to simplify configuration.
+    table := "fin-guard-esg-domain"
     sess, err := session.NewSession()
     if err != nil {
         return nil, err

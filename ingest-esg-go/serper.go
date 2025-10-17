@@ -80,12 +80,24 @@ func SearchESGLinks(company string, cfg *Config) ([]SearchItem, error) {
     client := &http.Client{Timeout: 20 * time.Second}
     seen := make(map[string]bool)
     var combined []SearchItem
+    // Expand the list of pillar queries to cover additional ESG-related
+    // terminology. Including both "report" and non-"report" variants
+    // increases coverage of web pages (e.g. landing pages or PDFs) that
+    // discuss ESG topics but may not include the word "report" in
+    // their titles. Adjusting these terms helps ensure we capture as
+    // many relevant documents as possible while still using a concise
+    // set of queries.
     pillars := []string{
         "ESG report",
         "sustainability report",
         "CSR report",
         "climate report",
         "DEI report",
+        "ESG",
+        "sustainability",
+        "CSR",
+        "climate",
+        "DEI",
     }
     // Helper to issue one Serper API request. It first attempts to
     // acquire a permit from the broker and call the API using the
@@ -196,6 +208,93 @@ func SearchESGLinks(company string, cfg *Config) ([]SearchItem, error) {
             })
         }
         time.Sleep(200 * time.Millisecond)
+    }
+    // Perform additional filetype-specific queries to capture PDFs and ASPX pages.
+    // By restricting the search to certain file extensions we can surface reports
+    // that might not appear in generic searches. This helps collect as many
+    // different document types as possible without relying on external
+    // configuration.
+    fileTypes := []string{"pdf", "aspx"}
+    for _, ft := range fileTypes {
+        for _, pillar := range pillars {
+            qPlain := fmt.Sprintf("%s %s filetype:%s", company, pillar, ft)
+            qFull := map[string]any{
+                "q":   qPlain,
+                "num": 100,
+            }
+            respParsed, _, _, err := post(qFull)
+            if err != nil && strings.Contains(err.Error(), "Query not allowed") {
+                respParsed, _, _, err = post(map[string]any{"q": qPlain})
+            }
+            if err != nil {
+                return nil, err
+            }
+            for _, o := range respParsed.Organic {
+                link := strings.TrimSpace(o.Link)
+                if link == "" || seen[link] {
+                    continue
+                }
+                if u, err := url.Parse(link); err == nil {
+                    u.Fragment = ""
+                    link = u.String()
+                }
+                seen[link] = true
+                combined = append(combined, SearchItem{
+                    Title: strings.TrimSpace(o.Title),
+                    Link:  link,
+                })
+            }
+            time.Sleep(200 * time.Millisecond)
+        }
+    }
+    // Dynamically search backwards by year until no results are found for
+    // several consecutive years. Starting from the current year and
+    // decrementing, we continue until three consecutive years yield no
+    // results across all pillar queries. This strategy automatically
+    // determines how far back to search and avoids missing older files.
+    emptyYearStreak := 0
+    maxEmptyStreak := 3
+    currentYear := time.Now().Year()
+    for y := currentYear; y >= 1980 && emptyYearStreak < maxEmptyStreak; y-- {
+        foundAny := false
+        for _, pillar := range pillars {
+            qPlain := fmt.Sprintf("%s %s %d", company, pillar, y)
+            qFull := map[string]any{
+                "q":   qPlain,
+                "num": 100,
+            }
+            respParsed, _, _, err := post(qFull)
+            if err != nil && strings.Contains(err.Error(), "Query not allowed") {
+                respParsed, _, _, err = post(map[string]any{"q": qPlain})
+            }
+            if err != nil {
+                return nil, err
+            }
+            if len(respParsed.Organic) > 0 {
+                foundAny = true
+            }
+            for _, o := range respParsed.Organic {
+                link := strings.TrimSpace(o.Link)
+                if link == "" || seen[link] {
+                    continue
+                }
+                if u, err := url.Parse(link); err == nil {
+                    u.Fragment = ""
+                    link = u.String()
+                }
+                seen[link] = true
+                combined = append(combined, SearchItem{
+                    Title: strings.TrimSpace(o.Title),
+                    Link:  link,
+                })
+            }
+            time.Sleep(200 * time.Millisecond)
+        }
+        if foundAny {
+            emptyYearStreak = 0
+        } else {
+            emptyYearStreak++
+        }
     }
     return combined, nil
 }

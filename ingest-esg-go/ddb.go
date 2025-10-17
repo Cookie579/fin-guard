@@ -37,10 +37,10 @@ type ESGDDBStore struct {
 // environment variable or falls back to ``fin-guard-esg-seen`` if unset.
 func NewESGDDBStore(ctx context.Context) (*ESGDDBStore, error) {
     // Determine the table name from environment or default.
-    table := os.Getenv("ESG_DDB_TABLE")
-    if table == "" {
-        table = "fin-guard-esg-seen"
-    }
+    // Do not rely on environment variables for the table name; use a
+    // sensible default directly. Environment variable ESG_DDB_TABLE is
+    // ignored to simplify configuration.
+    table := "fin-guard-esg-seen"
     // Use the default region for the AWS SDK. If AWS_REGION is set the
     // session will pick it up automatically. S3/Kinesis elsewhere in this
     // repository explicitly set us‑east‑1 but leaving it unset here allows

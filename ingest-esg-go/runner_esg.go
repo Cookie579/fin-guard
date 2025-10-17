@@ -32,30 +32,49 @@ func RunESGJob(ctx context.Context, jobID, ingestDate, ticker string, args *esgA
     if args.Region != "" {
         os.Setenv("AWS_REGION", args.Region)
     }
-    // Load companies.json and find the requested ticker. We assume
-    // companies.json exists alongside the binary. If multiple entries
-    // exist for the same ticker (unlikely) the first is used.
-    // Load companies.json to map tickers to company names. If the file
-    // cannot be loaded or the ticker is not found we fall back to
-    // using the ticker itself as the company name. This preserves
-    // backwards compatibility but allows clients to omit companies.json
-    // when launching jobs via the orchestrator.
-    var company *Company
-    if comps, err := LoadCompanies("companies.json"); err == nil {
-        for i := range comps {
-            if strings.EqualFold(comps[i].Ticker, ticker) {
-                company = &comps[i]
-                break
+    // Determine the company record without relying on a static companies.json.
+    // Historically we loaded companies.json to map tickers to human‑friendly
+    // company names. However this configuration file is no longer
+    // consulted. Instead we synthesise the company using the ticker as
+    // both the name and ticker. This ensures the ingest proceeds even
+    // when no local metadata is available. Additional metadata (such as
+    // the official domain) is looked up in DynamoDB or discovered on the
+    // fly via domain search.
+    company := &Company{Name: ticker, Ticker: ticker}
+    log.Printf("ℹ️ using ticker %s as company name", ticker)
+
+    // Before performing any ESG scraping we consult the domain cache to
+    // determine whether a domain has previously been discovered for this
+    // ticker. If no domain is cached we proactively run a domain
+    // discovery. This check prevents unnecessary lookups against a
+    // removed config.json and ensures that the domain data (when
+    // available) resides in DynamoDB. The domain discovery is
+    // performed only when the cache is empty. Any failure to access
+    // DynamoDB is logged but does not abort the job.
+    func() {
+        store, err := NewDomainDDBStore(ctx)
+        if err != nil {
+            log.Printf("⚠️ domain DDB init: %v", err)
+            return
+        }
+        cached, err := store.GetDomain(ctx, ticker)
+        if err != nil {
+            log.Printf("⚠️ domain DDB get %s: %v", ticker, err)
+            return
+        }
+        if cached == "" {
+            // No cached domain; run domain discovery. The FindDomain
+            // function will persist the result to DynamoDB, S3 and
+            // Kinesis. We ignore errors here because ESG scraping can
+            // continue even without a discovered domain.
+            entry, skipped, err := FindDomain(*company, cfg)
+            if err != nil {
+                log.Printf("domain lookup %s: %v", ticker, err)
+            } else if !skipped {
+                log.Printf("domain saved for %s: %s", ticker, entry.Domain)
             }
         }
-    }
-    // Fallback: synthesise a company using the ticker as its name. This
-    // allows the ingest to proceed even when companies.json is absent or
-    // the ticker is unknown. The Ticker is always upper‑cased.
-    if company == nil {
-        company = &Company{Name: ticker, Ticker: ticker}
-        log.Printf("ℹ️ using ticker %s as company name", ticker)
-    }
+    }()
     // Load the blacklist if specified. Absence of the file is not fatal.
     blacklist := map[string]struct{}{}
     if args.Blacklist != "" {
@@ -97,11 +116,13 @@ func RunESGJob(ctx context.Context, jobID, ingestDate, ticker string, args *esgA
         // controlled by ESG_USE_S3_SEEN_FALLBACK. If true and the call
         // fails the error is ignored and only DDB deduplication will be
         // used.
-        useS3Fallback := strings.EqualFold(os.Getenv("ESG_USE_S3_SEEN_FALLBACK"), "true")
+        // Do not rely on environment variables for fallback deduplication. Always
+        // perform deduplication via DynamoDB and avoid optional S3 seen list
+        // controlled by ESG_USE_S3_SEEN_FALLBACK. If needed, you can set
+        // useS3Fallback to true directly in code, but we default to false to
+        // simplify configuration.
+        useS3Fallback := false
         var seenS3 map[string]bool
-        if useS3Fallback {
-            seenS3, _ = LoadSeenURLs(args.Bucket, ticker)
-        }
         newCount := 0
         for _, item := range results {
             select {
