@@ -15,41 +15,46 @@ import (
     "crypto/sha1"
     "encoding/hex"
     "fmt"
-    "os"
     "strings"
     "time"
 
-    "github.com/aws/aws-sdk-go/aws"
-    "github.com/aws/aws-sdk-go/aws/session"
-    "github.com/aws/aws-sdk-go/service/dynamodb"
-    "github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
+    // AWS SDK v2 packages. The v1 SDK is deprecated as of July 31, 2025 so we
+    // migrate to v2. LoadDefaultConfig constructs an AWS configuration using
+    // the default credential chain and environment variables. The DynamoDB
+    // client is created from this config and attributevalue provides the
+    // MarshalMap helper to convert our structs to a map of AttributeValues【686512825217556†L286-L303】.
+    "github.com/aws/aws-sdk-go-v2/aws"
+    "github.com/aws/aws-sdk-go-v2/config"
+    "github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
+    "github.com/aws/aws-sdk-go-v2/service/dynamodb"
+    dynamodbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
 // ESGDDBStore wraps an AWS DynamoDB client and the target table. It
 // provides helper methods for deduplicating URLs on a per‑ticker basis.
 type ESGDDBStore struct {
-    client *dynamodb.DynamoDB
+    client *dynamodb.Client
     table  string
 }
 
 // NewESGDDBStore constructs a new ESGDDBStore using the default AWS
 // credential chain. The table name is derived from the ESG_DDB_TABLE
-// environment variable or falls back to ``fin-guard-esg-seen`` if unset.
+// environment variable or falls back to “fin-guard-esg-seen“ if unset.
 func NewESGDDBStore(ctx context.Context) (*ESGDDBStore, error) {
-    // Determine the table name from environment or default.
-    // Do not rely on environment variables for the table name; use a
-    // sensible default directly. Environment variable ESG_DDB_TABLE is
-    // ignored to simplify configuration.
+    // Determine the table name from environment or default. Do not rely on
+    // environment variables for the table name; use a sensible default
+    // directly. Environment variable ESG_DDB_TABLE is ignored to simplify
+    // configuration.
     table := "fin-guard-esg-seen"
-    // Use the default region for the AWS SDK. If AWS_REGION is set the
-    // session will pick it up automatically. S3/Kinesis elsewhere in this
-    // repository explicitly set us‑east‑1 but leaving it unset here allows
-    // override via env.
-    sess, err := session.NewSession()
+    // Load AWS configuration using the SDK v2. This picks up region and
+    // credentials from the environment or shared config files. See the AWS
+    // documentation for details.
+    cfg, err := config.LoadDefaultConfig(ctx)
     if err != nil {
         return nil, err
     }
-    svc := dynamodb.New(sess)
+    // Create a DynamoDB client from the loaded config.
+    svc := dynamodb.NewFromConfig(cfg)
     return &ESGDDBStore{client: svc, table: table}, nil
 }
 
@@ -57,8 +62,8 @@ func NewESGDDBStore(ctx context.Context) (*ESGDDBStore, error) {
 // hexadecimal string representation. Truncation is not applied because
 // DynamoDB sort keys can accommodate the full 40‑character hex digest.
 func hashURL(u string) string {
-    h := sha1.Sum([]byte(u))
-    return hex.EncodeToString(h[:])
+	h := sha1.Sum([]byte(u))
+	return hex.EncodeToString(h[:])
 }
 
 // IsSeenURL checks whether the given URL has already been stored for the
@@ -68,12 +73,16 @@ func hashURL(u string) string {
 func (s *ESGDDBStore) IsSeenURL(ctx context.Context, ticker, url string) (bool, error) {
     pk := fmt.Sprintf("esg#%s", strings.ToUpper(strings.TrimSpace(ticker)))
     sk := hashURL(url)
-    out, err := s.client.GetItemWithContext(ctx, &dynamodb.GetItemInput{
+    // Build the key using the v2 types. Each key attribute is represented
+    // using a specific AttributeValue type. Here we use AttributeValueMemberS
+    // for string values【686512825217556†L286-L303】.
+    key := map[string]dynamodbtypes.AttributeValue{
+        "pk": &dynamodbtypes.AttributeValueMemberS{Value: pk},
+        "sk": &dynamodbtypes.AttributeValueMemberS{Value: sk},
+    }
+    out, err := s.client.GetItem(ctx, &dynamodb.GetItemInput{
         TableName: aws.String(s.table),
-        Key: map[string]*dynamodb.AttributeValue{
-            "pk": {S: aws.String(pk)},
-            "sk": {S: aws.String(sk)},
-        },
+        Key:       key,
         ProjectionExpression: aws.String("pk"),
     })
     if err != nil {
@@ -86,13 +95,13 @@ func (s *ESGDDBStore) IsSeenURL(ctx context.Context, ticker, url string) (bool, 
 // marked as seen. DynamoDB only stores non‑empty fields so omitting Title
 // or Source is fine. Timestamps are stored as RFC3339 strings.
 type markPayload struct {
-    PK        string `dynamodbav:"pk"`
-    SK        string `dynamodbav:"sk"`
-    URL       string `dynamodbav:"url"`
-    Title     string `dynamodbav:"title,omitempty"`
-    Source    string `dynamodbav:"source,omitempty"`
-    FirstSeen string `dynamodbav:"first_seen"`
-    LastSeen  string `dynamodbav:"last_seen"`
+	PK        string `dynamodbav:"pk"`
+	SK        string `dynamodbav:"sk"`
+	URL       string `dynamodbav:"url"`
+	Title     string `dynamodbav:"title,omitempty"`
+	Source    string `dynamodbav:"source,omitempty"`
+	FirstSeen string `dynamodbav:"first_seen"`
+	LastSeen  string `dynamodbav:"last_seen"`
 }
 
 // MarkSeenURL stores a record for the provided URL and ticker. If a row
@@ -112,11 +121,13 @@ func (s *ESGDDBStore) MarkSeenURL(ctx context.Context, ticker, url, title, sourc
         FirstSeen: now,
         LastSeen:  now,
     }
-    av, err := dynamodbattribute.MarshalMap(item)
+    // Marshal the payload into a map of DynamoDB AttributeValues using the
+    // v2 attributevalue package【686512825217556†L286-L303】.
+    av, err := attributevalue.MarshalMap(item)
     if err != nil {
         return err
     }
-    _, err = s.client.PutItemWithContext(ctx, &dynamodb.PutItemInput{
+    _, err = s.client.PutItem(ctx, &dynamodb.PutItemInput{
         TableName: aws.String(s.table),
         Item:      av,
     })

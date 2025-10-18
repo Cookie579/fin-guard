@@ -10,14 +10,15 @@ package main
 
 import (
     "context"
-    "os"
     "strings"
     "time"
 
-    "github.com/aws/aws-sdk-go/aws"
-    "github.com/aws/aws-sdk-go/aws/session"
-    "github.com/aws/aws-sdk-go/service/dynamodb"
-    "github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
+    // AWS SDK v2 packages. See documentation for migrating from v1 to v2.
+    "github.com/aws/aws-sdk-go-v2/aws"
+    "github.com/aws/aws-sdk-go-v2/config"
+    "github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
+    "github.com/aws/aws-sdk-go-v2/service/dynamodb"
+    dynamodbtypes "github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 )
 
 // DomainRecord represents a row in the domain cache table.  Ticker is
@@ -25,16 +26,16 @@ import (
 // human‑readable context, while IngestTS records when the entry was
 // created.
 type DomainRecord struct {
-    Ticker   string `dynamodbav:"ticker"`
-    Company  string `dynamodbav:"company"`
-    Domain   string `dynamodbav:"domain"`
-    IngestTS string `dynamodbav:"ingest_ts"`
+	Ticker   string `dynamodbav:"ticker"`
+	Company  string `dynamodbav:"company"`
+	Domain   string `dynamodbav:"domain"`
+	IngestTS string `dynamodbav:"ingest_ts"`
 }
 
 // DomainDDBStore wraps a DynamoDB client and a table name.  It
 // provides helpers to retrieve and persist domain information.
 type DomainDDBStore struct {
-    client *dynamodb.DynamoDB
+    client *dynamodb.Client
     table  string
 }
 
@@ -46,11 +47,11 @@ func NewDomainDDBStore(ctx context.Context) (*DomainDDBStore, error) {
     // sensible default directly. Environment variable ESG_DOMAIN_DDB_TABLE
     // is ignored to simplify configuration.
     table := "fin-guard-esg-domain"
-    sess, err := session.NewSession()
+    cfg, err := config.LoadDefaultConfig(ctx)
     if err != nil {
         return nil, err
     }
-    svc := dynamodb.New(sess)
+    svc := dynamodb.NewFromConfig(cfg)
     return &DomainDDBStore{client: svc, table: table}, nil
 }
 
@@ -60,11 +61,12 @@ func NewDomainDDBStore(ctx context.Context) (*DomainDDBStore, error) {
 // caller.  The ticker is normalised to upper case.
 func (s *DomainDDBStore) GetDomain(ctx context.Context, ticker string) (string, error) {
     tk := strings.ToUpper(strings.TrimSpace(ticker))
-    out, err := s.client.GetItemWithContext(ctx, &dynamodb.GetItemInput{
+    key := map[string]dynamodbtypes.AttributeValue{
+        "ticker": &dynamodbtypes.AttributeValueMemberS{Value: tk},
+    }
+    out, err := s.client.GetItem(ctx, &dynamodb.GetItemInput{
         TableName: aws.String(s.table),
-        Key: map[string]*dynamodb.AttributeValue{
-            "ticker": {S: aws.String(tk)},
-        },
+        Key:       key,
         ProjectionExpression: aws.String("domain"),
     })
     if err != nil {
@@ -73,8 +75,10 @@ func (s *DomainDDBStore) GetDomain(ctx context.Context, ticker string) (string, 
     if len(out.Item) == 0 {
         return "", nil
     }
-    if v, ok := out.Item["domain"]; ok && v.S != nil {
-        return *v.S, nil
+    if v, ok := out.Item["domain"]; ok {
+        if sv, ok := v.(*dynamodbtypes.AttributeValueMemberS); ok {
+            return sv.Value, nil
+        }
     }
     return "", nil
 }
@@ -90,11 +94,11 @@ func (s *DomainDDBStore) PutDomain(ctx context.Context, ticker, company, domain 
         Domain:   domain,
         IngestTS: time.Now().UTC().Format(time.RFC3339),
     }
-    av, err := dynamodbattribute.MarshalMap(item)
+    av, err := attributevalue.MarshalMap(item)
     if err != nil {
         return err
     }
-    _, err = s.client.PutItemWithContext(ctx, &dynamodb.PutItemInput{
+    _, err = s.client.PutItem(ctx, &dynamodb.PutItemInput{
         TableName: aws.String(s.table),
         Item:      av,
     })
