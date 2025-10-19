@@ -75,7 +75,18 @@ func hostMatchesDomain(host, domain string) bool {
 // acquirePermit/reportResult. On non‑fatal errors the function
 // returns the error to the caller without aggregating partial
 // results. The caller should handle such errors appropriately.
-func SearchESGLinks(company string, cfg *Config) ([]SearchItem, error) {
+// SearchESGLinks performs multiple Serper API calls to find links
+// related to a company's ESG reporting. It iterates over a set of
+// pillar keywords (ESG report, sustainability report, CSR report,
+// climate report, DEI report) and aggregates unique results. Calls
+// to the upstream API are mediated by the rate broker via
+// acquirePermit/reportResult. On non‑fatal errors the function
+// returns the error to the caller without aggregating partial
+// results. When minResults is greater than zero the function will
+// continue expanding the year-based search beyond the default cut‑off
+// (1980 and three consecutive empty years) until at least that many
+// unique results have been collected or no more results are found.
+func SearchESGLinks(company string, cfg *Config, minResults int) ([]SearchItem, error) {
     ctx := context.Background()
     client := &http.Client{Timeout: 20 * time.Second}
     seen := make(map[string]bool)
@@ -250,11 +261,17 @@ func SearchESGLinks(company string, cfg *Config) ([]SearchItem, error) {
     // Dynamically search backwards by year until no results are found for
     // several consecutive years. Starting from the current year and
     // decrementing, we continue until three consecutive years yield no
-    // results across all pillar queries. This strategy automatically
-    // determines how far back to search and avoids missing older files.
+    // results across all pillar queries. If a minimum number of results
+    // (minResults) is requested and we haven't reached that threshold
+    // after the default search range (down to 1980), we extend the search
+    // further back in time to attempt to satisfy the minimum. The
+    // extended search terminates once we either collect enough results,
+    // encounter several years with no results, or hit an earliest year
+    // cutoff (1900) to avoid unbounded loops.
     emptyYearStreak := 0
     maxEmptyStreak := 3
     currentYear := time.Now().Year()
+    // Primary year search down to 1980
     for y := currentYear; y >= 1980 && emptyYearStreak < maxEmptyStreak; y-- {
         foundAny := false
         for _, pillar := range pillars {
@@ -294,6 +311,62 @@ func SearchESGLinks(company string, cfg *Config) ([]SearchItem, error) {
             emptyYearStreak = 0
         } else {
             emptyYearStreak++
+        }
+    }
+    // If a minimum number of results was requested and the initial year search
+    // did not yield enough links, continue searching earlier years. We
+    // restart the emptyYearStreak counter and search down from 1979 to
+    // an earliest cutoff year. The search stops when we either reach
+    // minResults, encounter several consecutive empty years, or hit the
+    // cutoff.
+    if minResults > 0 && len(combined) < minResults {
+        earliestYear := 1900
+        emptyYearStreak = 0
+        for y := 1979; y >= earliestYear && emptyYearStreak < maxEmptyStreak; y-- {
+            foundAny := false
+            for _, pillar := range pillars {
+                qPlain := fmt.Sprintf("%s %s %d", company, pillar, y)
+                qFull := map[string]any{
+                    "q":   qPlain,
+                    "num": 100,
+                }
+                respParsed, _, _, err := post(qFull)
+                if err != nil && strings.Contains(err.Error(), "Query not allowed") {
+                    respParsed, _, _, err = post(map[string]any{"q": qPlain})
+                }
+                if err != nil {
+                    return nil, err
+                }
+                if len(respParsed.Organic) > 0 {
+                    foundAny = true
+                }
+                for _, o := range respParsed.Organic {
+                    link := strings.TrimSpace(o.Link)
+                    if link == "" || seen[link] {
+                        continue
+                    }
+                    if u, err := url.Parse(link); err == nil {
+                        u.Fragment = ""
+                        link = u.String()
+                    }
+                    seen[link] = true
+                    combined = append(combined, SearchItem{
+                        Title: strings.TrimSpace(o.Title),
+                        Link:  link,
+                    })
+                }
+                time.Sleep(200 * time.Millisecond)
+            }
+            if foundAny {
+                emptyYearStreak = 0
+            } else {
+                emptyYearStreak++
+            }
+            // If we've reached our target number of results, stop early to
+            // avoid unnecessary API calls.
+            if len(combined) >= minResults {
+                break
+            }
         }
     }
     return combined, nil

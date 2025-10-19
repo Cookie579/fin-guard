@@ -25,6 +25,12 @@ type esgArgs struct {
     Blacklist   string
     Concurrency int
     Region      string
+    // MinNew specifies the minimum number of new ESG files to attempt to
+    // discover for each ticker. When set to a positive value the ingest
+    // worker will continue expanding its Serper queries (e.g. searching
+    // across more years) until at least this many unique links are
+    // retrieved. If zero or unspecified the default search depth is used.
+    MinNew      int
 }
 
 // ingestDateFormat defines the format used to stamp the ingest date on
@@ -70,6 +76,11 @@ func main() {
         fs.StringVar(&args.Blacklist, "blacklist", "", "Path to blacklist file (leave blank to use DDB)")
         fs.IntVar(&args.Concurrency, "concurrency", 1, "Number of tickers to process in parallel")
         fs.StringVar(&args.Region, "region", os.Getenv("AWS_REGION"), "AWS region override (optional)")
+        // Accept a minimum number of new files to collect. This flag enables
+        // callers to instruct the worker to keep searching until at least
+        // N new ESG links are found. It defaults to 0, which preserves
+        // the existing behaviour of stopping after a fixed search depth.
+        fs.IntVar(&args.MinNew, "min-new", 0, "Minimum number of new ESG files to discover (optional)")
         fs.Usage = func() {
             fmt.Fprintf(os.Stderr, "Collect ESG links and/or domains for one or more tickers.\n\n")
             fs.PrintDefaults()

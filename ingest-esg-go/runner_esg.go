@@ -100,7 +100,11 @@ func RunESGJob(ctx context.Context, jobID, ingestDate, ticker string, args *esgA
 	// the broker, deduplicate results and emit records to S3 and Kinesis.
 	if args.Mode == "esg" || args.Mode == "esg+domain" {
 		log.Printf("🔍 Serper ESG search for %s …", company.Name)
-		results, err := SearchESGLinks(company.Name, cfg)
+        // Pass through the minimum number of new records requested via
+        // args.MinNew. SearchESGLinks will attempt to gather at least this
+        // many unique results by expanding its search across years when
+        // possible.
+        results, err := SearchESGLinks(company.Name, cfg, args.MinNew)
 		if err != nil {
 			log.Printf("search %s: %v", ticker, err)
 			return err
