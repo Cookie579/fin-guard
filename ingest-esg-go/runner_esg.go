@@ -31,16 +31,34 @@ func RunESGJob(ctx context.Context, jobID, ingestDate, ticker string, args *esgA
 	if args.Region != "" {
 		os.Setenv("AWS_REGION", args.Region)
 	}
-	// Determine the company record without relying on a static companies.json.
-	// Historically we loaded companies.json to map tickers to human‑friendly
-	// company names. However this configuration file is no longer
-	// consulted. Instead we synthesise the company using the ticker as
-	// both the name and ticker. This ensures the ingest proceeds even
-	// when no local metadata is available. Additional metadata (such as
-	// the official domain) is looked up in DynamoDB or discovered on the
-	// fly via domain search.
-	company := &Company{Name: ticker, Ticker: ticker}
-	log.Printf("ℹ️ using ticker %s as company name", ticker)
+    // Determine the company record without relying on a static companies.json.
+    // Historically we loaded companies.json to map tickers to human‑friendly
+    // company names. However this configuration file is no longer
+    // consulted. Instead we attempt to look up the company name and CIK
+    // from a dedicated DynamoDB table (company_cik_map). If no record
+    // exists or an error occurs we fall back to using the ticker itself
+    // as both name and ticker. This ensures the ingest proceeds even
+    // when no local metadata is available. Additional metadata (such as
+    // the official domain) is looked up in DynamoDB or discovered on the
+    // fly via domain search.
+    company := &Company{Ticker: ticker, Name: ticker}
+    // Attempt to resolve the full company name from company_cik_map. If
+    // the lookup fails or returns an empty name we retain the ticker as
+    // the company name. The CIK is also populated when available.
+    if store, err := NewCompanyCIKMapStore(ctx); err == nil {
+        if name, cik, err2 := store.GetCompanyName(ctx, ticker); err2 == nil && name != "" {
+            company.Name = name
+            // Populate the CIK if present. Note that Company.CIK is not used
+            // elsewhere in the ingest but storing it here simplifies
+            // debugging and potential future enhancements.
+            company.CIK = cik
+            log.Printf("ℹ️ using company name %s for ticker %s", name, ticker)
+        } else {
+            log.Printf("ℹ️ using ticker %s as company name", ticker)
+        }
+    } else {
+        log.Printf("ℹ️ using ticker %s as company name", ticker)
+    }
 
 	// Before performing any ESG scraping we consult the domain cache to
 	// determine whether a domain has previously been discovered for this
