@@ -2,372 +2,338 @@ package main
 
 // serper.go implements ESG link search via the Serper API. It has
 // been copied from the original utils/serper.go and modified only to
-// reside in the top‑level package. All functions retain their
+// reside in the top-level package. All functions retain their
 // behaviour so that ingest jobs can call SearchESGLinks without
 // referencing the old utils directory. See broker_client.go for the
-// rate‑broker integration used herein.
+// rate-broker integration used herein.
 
 import (
-    "bufio"
-    "bytes"
-    "context"
-    "encoding/json"
-    "fmt"
-    "io"
-    "net/http"
-    "net/url"
-    "os"
-    "strings"
-    "time"
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log" // for progress logs when min-new is reached
+	"net/http"
+	"net/url"
+	"os"
+	"strings"
+	"time"
 )
 
 // SearchItem represents one organic search result returned by Serper.
-// Only the title and link are used for ESG ingest. Additional fields
-// are ignored when decoding the API response.
 type SearchItem struct {
-    Title string `json:"title"`
-    Link  string `json:"link"`
+	Title string `json:"title"`
+	Link  string `json:"link"`
 }
 
 type serperResp struct {
-    Organic []struct {
-        Title string `json:"title"`
-        Link  string `json:"link"`
-    } `json:"organic"`
+	Organic []struct {
+		Title string `json:"title"`
+		Link  string `json:"link"`
+	} `json:"organic"`
 }
 
-// LoadBlacklist reads a plain text file containing domains to exclude
-// when scraping ESG links. Lines starting with # or blank lines are
-// ignored. Domains are lower‑cased. Errors while opening or scanning
-// the file are returned to the caller.
+// LoadBlacklist reads a plain text file containing domains to exclude.
 func LoadBlacklist(path string) (map[string]struct{}, error) {
-    f, err := os.Open(path)
-    if err != nil {
-        return nil, err
-    }
-    defer f.Close()
-    blk := make(map[string]struct{})
-    sc := bufio.NewScanner(f)
-    for sc.Scan() {
-        d := strings.ToLower(strings.TrimSpace(sc.Text()))
-        if d == "" || strings.HasPrefix(d, "#") {
-            continue
-        }
-        blk[d] = struct{}{}
-    }
-    return blk, sc.Err()
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	blk := make(map[string]struct{})
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		d := strings.ToLower(strings.TrimSpace(sc.Text()))
+		if d == "" || strings.HasPrefix(d, "#") {
+			continue
+		}
+		blk[d] = struct{}{}
+	}
+	return blk, sc.Err()
 }
 
-// hostMatchesDomain returns true when the given host exactly matches
-// domain or is a subdomain of it. It performs a case‑insensitive
-// comparison. This helper is used during blacklist filtering.
+// hostMatchesDomain returns true when host == domain or is a subdomain.
 func hostMatchesDomain(host, domain string) bool {
-    host = strings.ToLower(host)
-    domain = strings.ToLower(domain)
-    return host == domain || strings.HasSuffix(host, "."+domain)
+	host = strings.ToLower(host)
+	domain = strings.ToLower(domain)
+	return host == domain || strings.HasSuffix(host, "."+domain)
 }
 
-// SearchESGLinks performs multiple Serper API calls to find links
-// related to a company's ESG reporting. It iterates over a set of
-// pillar keywords (ESG report, sustainability report, CSR report,
-// climate report, DEI report) and aggregates unique results. Calls
-// to the upstream API are mediated by the rate broker via
-// acquirePermit/reportResult. On non‑fatal errors the function
-// returns the error to the caller without aggregating partial
-// results. The caller should handle such errors appropriately.
-// SearchESGLinks performs multiple Serper API calls to find links
-// related to a company's ESG reporting. It iterates over a set of
-// pillar keywords (ESG report, sustainability report, CSR report,
-// climate report, DEI report) and aggregates unique results. Calls
-// to the upstream API are mediated by the rate broker via
-// acquirePermit/reportResult. On non‑fatal errors the function
-// returns the error to the caller without aggregating partial
-// results. When minResults is greater than zero the function will
-// continue expanding the year-based search beyond the default cut‑off
-// (1980 and three consecutive empty years) until at least that many
-// unique results have been collected or no more results are found.
+// SearchESGLinks performs multiple Serper API calls to find ESG links.
+// When minResults > 0, it will stop scheduling NEW query blocks as soon
+// as >= minResults unique links have been aggregated (it still finishes
+// the block that crossed the threshold).
 func SearchESGLinks(company string, cfg *Config, minResults int) ([]SearchItem, error) {
-    ctx := context.Background()
-    client := &http.Client{Timeout: 20 * time.Second}
-    seen := make(map[string]bool)
-    var combined []SearchItem
-    // Expand the list of pillar queries to cover additional ESG-related
-    // terminology. Including both "report" and non-"report" variants
-    // increases coverage of web pages (e.g. landing pages or PDFs) that
-    // discuss ESG topics but may not include the word "report" in
-    // their titles. Adjusting these terms helps ensure we capture as
-    // many relevant documents as possible while still using a concise
-    // set of queries.
-    pillars := []string{
-        "ESG report",
-        "sustainability report",
-        "CSR report",
-        "climate report",
-        "DEI report",
-        "ESG",
-        "sustainability",
-        "CSR",
-        "climate",
-        "DEI",
-    }
-    // Helper to issue one Serper API request. It first attempts to
-    // acquire a permit from the broker and call the API using the
-    // returned key. If the broker returns an "unknown api" error it
-    // falls back to calling Serper directly using the API key from
-    // config. The function returns the parsed response, HTTP status
-    // code, raw body and any error encountered.
-    post := func(body any) (*serperResp, int, []byte, error) {
-        b, _ := json.Marshal(body)
-        // Attempt to acquire a permit from the rate broker.
-        lease, err := acquirePermit(ctx, "serper")
-        if err != nil {
-            // If the broker doesn't recognise the API name, fall back to a
-            // direct Serper API call using our own key. The broker wraps its
-            // error strings with context, so perform a substring match.
-            if strings.Contains(err.Error(), "unknown api") {
-                // Select API key from config. Prefer SerperAPIKey, then
-                // fallback to the first entry in SerperKeys.
-                key := strings.TrimSpace(cfg.SerperAPIKey)
-                if key == "" && len(cfg.SerperKeys) > 0 {
-                    key = strings.TrimSpace(cfg.SerperKeys[0])
-                }
-                if key == "" {
-                    // Without any key we cannot call the API.
-                    return nil, 0, nil, fmt.Errorf("broker acquire: %w", err)
-                }
-                req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://google.serper.dev/search", bytes.NewReader(b))
-                req.Header.Set("Content-Type", "application/json")
-                req.Header.Set("X-API-KEY", key)
-                var status int
-                var raw []byte
-                resp, doErr := client.Do(req)
-                if resp != nil {
-                    status = resp.StatusCode
-                    raw, _ = io.ReadAll(resp.Body)
-                    resp.Body.Close()
-                }
-                if doErr != nil {
-                    return nil, status, raw, doErr
-                }
-                if status >= 300 {
-                    return nil, status, raw, fmt.Errorf("serper.dev HTTP %d: %s", status, strings.TrimSpace(string(raw)))
-                }
-                var out serperResp
-                if err := json.Unmarshal(raw, &out); err != nil {
-                    return nil, status, raw, err
-                }
-                return &out, status, raw, nil
-            }
-            // Propagate other errors from the broker.
-            return nil, 0, nil, fmt.Errorf("broker acquire: %w", err)
-        }
-        // With a broker lease, call the API using the provided key.
-        req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://google.serper.dev/search", bytes.NewReader(b))
-        req.Header.Set("Content-Type", "application/json")
-        req.Header.Set("X-API-KEY", lease.Key)
-        var status int
-        var retryAfterMs int
-        var raw []byte
-        resp, doErr := client.Do(req)
-        if resp != nil {
-            status = resp.StatusCode
-            retryAfterMs = parseRetryAfterMs(resp.Header.Get("Retry-After"), time.Now())
-            raw, _ = io.ReadAll(resp.Body)
-            resp.Body.Close()
-        }
-        ok := (doErr == nil && status < 300)
-        // Always report the result back to the broker.
-        reportResult(ctx, lease.ID, ok, status, retryAfterMs)
-        if doErr != nil {
-            return nil, status, raw, doErr
-        }
-        if status >= 300 {
-            return nil, status, raw, fmt.Errorf("serper.dev HTTP %d: %s", status, strings.TrimSpace(string(raw)))
-        }
-        var out serperResp
-        if err := json.Unmarshal(raw, &out); err != nil {
-            return nil, status, raw, err
-        }
-        return &out, status, raw, nil
-    }
-    for _, pillar := range pillars {
-        qPlain := fmt.Sprintf("%s %s", company, pillar)
-        qFull := map[string]any{
-            "q":   qPlain,
-            "num": 100,
-        }
-        respParsed, _, _, err := post(qFull)
-        if err != nil && strings.Contains(err.Error(), "Query not allowed") {
-            respParsed, _, _, err = post(map[string]any{"q": qPlain})
-        }
-        if err != nil {
-            return nil, err
-        }
-        for _, o := range respParsed.Organic {
-            link := strings.TrimSpace(o.Link)
-            if link == "" || seen[link] {
-                continue
-            }
-            if u, err := url.Parse(link); err == nil {
-                u.Fragment = ""
-                link = u.String()
-            }
-            seen[link] = true
-            combined = append(combined, SearchItem{
-                Title: strings.TrimSpace(o.Title),
-                Link:  link,
-            })
-        }
-        time.Sleep(200 * time.Millisecond)
-    }
-    // Perform additional filetype-specific queries to capture PDFs and ASPX pages.
-    // By restricting the search to certain file extensions we can surface reports
-    // that might not appear in generic searches. This helps collect as many
-    // different document types as possible without relying on external
-    // configuration.
-    fileTypes := []string{"pdf", "aspx"}
-    for _, ft := range fileTypes {
-        for _, pillar := range pillars {
-            qPlain := fmt.Sprintf("%s %s filetype:%s", company, pillar, ft)
-            qFull := map[string]any{
-                "q":   qPlain,
-                "num": 100,
-            }
-            respParsed, _, _, err := post(qFull)
-            if err != nil && strings.Contains(err.Error(), "Query not allowed") {
-                respParsed, _, _, err = post(map[string]any{"q": qPlain})
-            }
-            if err != nil {
-                return nil, err
-            }
-            for _, o := range respParsed.Organic {
-                link := strings.TrimSpace(o.Link)
-                if link == "" || seen[link] {
-                    continue
-                }
-                if u, err := url.Parse(link); err == nil {
-                    u.Fragment = ""
-                    link = u.String()
-                }
-                seen[link] = true
-                combined = append(combined, SearchItem{
-                    Title: strings.TrimSpace(o.Title),
-                    Link:  link,
-                })
-            }
-            time.Sleep(200 * time.Millisecond)
-        }
-    }
-    // Dynamically search backwards by year until no results are found for
-    // several consecutive years. Starting from the current year and
-    // decrementing, we continue until three consecutive years yield no
-    // results across all pillar queries. If a minimum number of results
-    // (minResults) is requested and we haven't reached that threshold
-    // after the default search range (down to 1980), we extend the search
-    // further back in time to attempt to satisfy the minimum. The
-    // extended search terminates once we either collect enough results,
-    // encounter several years with no results, or hit an earliest year
-    // cutoff (1900) to avoid unbounded loops.
-    emptyYearStreak := 0
-    maxEmptyStreak := 3
-    currentYear := time.Now().Year()
-    // Primary year search down to 1980
-    for y := currentYear; y >= 1980 && emptyYearStreak < maxEmptyStreak; y-- {
-        foundAny := false
-        for _, pillar := range pillars {
-            qPlain := fmt.Sprintf("%s %s %d", company, pillar, y)
-            qFull := map[string]any{
-                "q":   qPlain,
-                "num": 100,
-            }
-            respParsed, _, _, err := post(qFull)
-            if err != nil && strings.Contains(err.Error(), "Query not allowed") {
-                respParsed, _, _, err = post(map[string]any{"q": qPlain})
-            }
-            if err != nil {
-                return nil, err
-            }
-            if len(respParsed.Organic) > 0 {
-                foundAny = true
-            }
-            for _, o := range respParsed.Organic {
-                link := strings.TrimSpace(o.Link)
-                if link == "" || seen[link] {
-                    continue
-                }
-                if u, err := url.Parse(link); err == nil {
-                    u.Fragment = ""
-                    link = u.String()
-                }
-                seen[link] = true
-                combined = append(combined, SearchItem{
-                    Title: strings.TrimSpace(o.Title),
-                    Link:  link,
-                })
-            }
-            time.Sleep(200 * time.Millisecond)
-        }
-        if foundAny {
-            emptyYearStreak = 0
-        } else {
-            emptyYearStreak++
-        }
-    }
-    // If a minimum number of results was requested and the initial year search
-    // did not yield enough links, continue searching earlier years. We
-    // restart the emptyYearStreak counter and search down from 1979 to
-    // an earliest cutoff year. The search stops when we either reach
-    // minResults, encounter several consecutive empty years, or hit the
-    // cutoff.
-    if minResults > 0 && len(combined) < minResults {
-        earliestYear := 1900
-        emptyYearStreak = 0
-        for y := 1979; y >= earliestYear && emptyYearStreak < maxEmptyStreak; y-- {
-            foundAny := false
-            for _, pillar := range pillars {
-                qPlain := fmt.Sprintf("%s %s %d", company, pillar, y)
-                qFull := map[string]any{
-                    "q":   qPlain,
-                    "num": 100,
-                }
-                respParsed, _, _, err := post(qFull)
-                if err != nil && strings.Contains(err.Error(), "Query not allowed") {
-                    respParsed, _, _, err = post(map[string]any{"q": qPlain})
-                }
-                if err != nil {
-                    return nil, err
-                }
-                if len(respParsed.Organic) > 0 {
-                    foundAny = true
-                }
-                for _, o := range respParsed.Organic {
-                    link := strings.TrimSpace(o.Link)
-                    if link == "" || seen[link] {
-                        continue
-                    }
-                    if u, err := url.Parse(link); err == nil {
-                        u.Fragment = ""
-                        link = u.String()
-                    }
-                    seen[link] = true
-                    combined = append(combined, SearchItem{
-                        Title: strings.TrimSpace(o.Title),
-                        Link:  link,
-                    })
-                }
-                time.Sleep(200 * time.Millisecond)
-            }
-            if foundAny {
-                emptyYearStreak = 0
-            } else {
-                emptyYearStreak++
-            }
-            // If we've reached our target number of results, stop early to
-            // avoid unnecessary API calls.
-            if len(combined) >= minResults {
-                break
-            }
-        }
-    }
-    return combined, nil
+	ctx := context.Background()
+	client := &http.Client{Timeout: 20 * time.Second}
+	seen := make(map[string]bool)
+	var combined []SearchItem
+
+	// Helper: have we hit the requested minimum?
+	enough := func() bool {
+		return minResults > 0 && len(combined) >= minResults
+	}
+
+	// ESG-related query pillars
+	pillars := []string{
+		"ESG report",
+		"sustainability report",
+		"CSR report",
+		"climate report",
+		"DEI report",
+		"ESG",
+		"sustainability",
+		"CSR",
+		"climate",
+		"DEI",
+	}
+
+	// Helper to POST to Serper (via broker if available)
+	post := func(body any) (*serperResp, int, []byte, error) {
+		b, _ := json.Marshal(body)
+		lease, err := acquirePermit(ctx, "serper")
+		if err != nil {
+			// Fallback to direct Serper if the broker doesn't know this API
+			if strings.Contains(err.Error(), "unknown api") {
+				key := strings.TrimSpace(cfg.SerperAPIKey)
+				if key == "" && len(cfg.SerperKeys) > 0 {
+					key = strings.TrimSpace(cfg.SerperKeys[0])
+				}
+				if key == "" {
+					return nil, 0, nil, fmt.Errorf("broker acquire: %w", err)
+				}
+				req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://google.serper.dev/search", bytes.NewReader(b))
+				req.Header.Set("Content-Type", "application/json")
+				req.Header.Set("X-API-KEY", key)
+				var status int
+				var raw []byte
+				resp, doErr := client.Do(req)
+				if resp != nil {
+					status = resp.StatusCode
+					raw, _ = io.ReadAll(resp.Body)
+					resp.Body.Close()
+				}
+				if doErr != nil {
+					return nil, status, raw, doErr
+				}
+				if status >= 300 {
+					return nil, status, raw, fmt.Errorf("serper.dev HTTP %d: %s", status, strings.TrimSpace(string(raw)))
+				}
+				var out serperResp
+				if err := json.Unmarshal(raw, &out); err != nil {
+					return nil, status, raw, err
+				}
+				return &out, status, raw, nil
+			}
+			return nil, 0, nil, fmt.Errorf("broker acquire: %w", err)
+		}
+
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://google.serper.dev/search", bytes.NewReader(b))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-API-KEY", lease.Key)
+
+		var status int
+		var retryAfterMs int
+		var raw []byte
+
+		resp, doErr := client.Do(req)
+		if resp != nil {
+			status = resp.StatusCode
+			retryAfterMs = parseRetryAfterMs(resp.Header.Get("Retry-After"), time.Now())
+			raw, _ = io.ReadAll(resp.Body)
+			resp.Body.Close()
+		}
+		ok := (doErr == nil && status < 300)
+		reportResult(ctx, lease.ID, ok, status, retryAfterMs)
+
+		if doErr != nil {
+			return nil, status, raw, doErr
+		}
+		if status >= 300 {
+			return nil, status, raw, fmt.Errorf("serper.dev HTTP %d: %s", status, strings.TrimSpace(string(raw)))
+		}
+		var out serperResp
+		if err := json.Unmarshal(raw, &out); err != nil {
+			return nil, status, raw, err
+		}
+		return &out, status, raw, nil
+	}
+
+	// -------- Pillar sweep --------
+PILLARS:
+	for _, pillar := range pillars {
+		qPlain := fmt.Sprintf("%s %s", company, pillar)
+		qFull := map[string]any{"q": qPlain, "num": 100}
+
+		respParsed, _, _, err := post(qFull)
+		if err != nil && strings.Contains(err.Error(), "Query not allowed") {
+			respParsed, _, _, err = post(map[string]any{"q": qPlain})
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		for _, o := range respParsed.Organic {
+			link := strings.TrimSpace(o.Link)
+			if link == "" || seen[link] {
+				continue
+			}
+			if u, err := url.Parse(link); err == nil {
+				u.Fragment = ""
+				link = u.String()
+			}
+			seen[link] = true
+			combined = append(combined, SearchItem{
+				Title: strings.TrimSpace(o.Title),
+				Link:  link,
+			})
+		}
+		if enough() {
+			log.Printf("🎯 min-new reached (%d >= %d) after pillar sweep; stopping new pillar queries", len(combined), minResults)
+			break PILLARS
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	// -------- Filetype sweep --------
+	fileTypes := []string{"pdf", "aspx"}
+FILETYPES:
+	for _, ft := range fileTypes {
+		for _, pillar := range pillars {
+			qPlain := fmt.Sprintf("%s %s filetype:%s", company, pillar, ft)
+			qFull := map[string]any{"q": qPlain, "num": 100}
+
+			respParsed, _, _, err := post(qFull)
+			if err != nil && strings.Contains(err.Error(), "Query not allowed") {
+				respParsed, _, _, err = post(map[string]any{"q": qPlain})
+			}
+			if err != nil {
+				return nil, err
+			}
+
+			for _, o := range respParsed.Organic {
+				link := strings.TrimSpace(o.Link)
+				if link == "" || seen[link] {
+					continue
+				}
+				if u, err := url.Parse(link); err == nil {
+					u.Fragment = ""
+					link = u.String()
+				}
+				seen[link] = true
+				combined = append(combined, SearchItem{
+					Title: strings.TrimSpace(o.Title),
+					Link:  link,
+				})
+			}
+			if enough() {
+				log.Printf("🎯 min-new reached (%d >= %d) after filetype sweep; stopping new filetype queries", len(combined), minResults)
+				break FILETYPES
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+	}
+
+	// -------- Year sweep (present → 1980) --------
+	emptyYearStreak := 0
+	maxEmptyStreak := 3
+	currentYear := time.Now().Year()
+
+YEARS:
+	for y := currentYear; y >= 1980 && emptyYearStreak < maxEmptyStreak; y-- {
+		foundAny := false
+		for _, pillar := range pillars {
+			qPlain := fmt.Sprintf("%s %s %d", company, pillar, y)
+			qFull := map[string]any{"q": qPlain, "num": 100}
+
+			respParsed, _, _, err := post(qFull)
+			if err != nil && strings.Contains(err.Error(), "Query not allowed") {
+				respParsed, _, _, err = post(map[string]any{"q": qPlain})
+			}
+			if err != nil {
+				return nil, err
+			}
+			if len(respParsed.Organic) > 0 {
+				foundAny = true
+			}
+			for _, o := range respParsed.Organic {
+				link := strings.TrimSpace(o.Link)
+				if link == "" || seen[link] {
+					continue
+				}
+				if u, err := url.Parse(link); err == nil {
+					u.Fragment = ""
+					link = u.String()
+				}
+				seen[link] = true
+				combined = append(combined, SearchItem{
+					Title: strings.TrimSpace(o.Title),
+					Link:  link,
+				})
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+		if foundAny {
+			emptyYearStreak = 0
+		} else {
+			emptyYearStreak++
+		}
+		if enough() {
+			log.Printf("🎯 min-new reached (%d >= %d) at year %d; stopping new year queries", len(combined), minResults, y)
+			break YEARS
+		}
+	}
+
+	// -------- Extended year sweep (1979 → 1900) if still below target --------
+	if minResults > 0 && len(combined) < minResults {
+		earliestYear := 1900
+		emptyYearStreak = 0
+		for y := 1979; y >= earliestYear && emptyYearStreak < maxEmptyStreak; y-- {
+			foundAny := false
+			for _, pillar := range pillars {
+				qPlain := fmt.Sprintf("%s %s %d", company, pillar, y)
+				qFull := map[string]any{"q": qPlain, "num": 100}
+
+				respParsed, _, _, err := post(qFull)
+				if err != nil && strings.Contains(err.Error(), "Query not allowed") {
+					respParsed, _, _, err = post(map[string]any{"q": qPlain})
+				}
+				if err != nil {
+					return nil, err
+				}
+				if len(respParsed.Organic) > 0 {
+					foundAny = true
+				}
+				for _, o := range respParsed.Organic {
+					link := strings.TrimSpace(o.Link)
+					if link == "" || seen[link] {
+						continue
+					}
+					if u, err := url.Parse(link); err == nil {
+						u.Fragment = ""
+						link = u.String()
+					}
+					seen[link] = true
+					combined = append(combined, SearchItem{
+						Title: strings.TrimSpace(o.Title),
+						Link:  link,
+					})
+				}
+				time.Sleep(200 * time.Millisecond)
+			}
+			if foundAny {
+				emptyYearStreak = 0
+			} else {
+				emptyYearStreak++
+			}
+			if enough() {
+				log.Printf("🎯 min-new reached (%d >= %d) at extended year %d; stopping new queries", len(combined), minResults, y)
+				break // break the extended year for-loop
+			}
+		}
+	}
+
+	return combined, nil
 }
