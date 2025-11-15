@@ -33,7 +33,7 @@ func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stock
 
 	emitMeta := func(eventType string, extra map[string]any) {
 		rec := map[string]any{
-			"stage":  StageEvents,
+			"stage":  stageMetadata,
 			"type":   eventType,
 			"source": source,
 			"ticker": ticker,

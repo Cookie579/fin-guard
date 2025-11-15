@@ -81,7 +81,7 @@ func FetchRecentFilings(company Company) ([]utils.Filing, error) {
 				FilingDate: submission.Filings.Recent.FilingDate[i], // “2024-11-01”
 				Accession:  accession,
 				URL:        indexURL,
-				Stage:      "raw",
+				Stage:      "RAW",
 			})
 		}
 	}

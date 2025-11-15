@@ -82,7 +82,7 @@ func MakeStocktwitsEnvelope(raw RawStocktwitsMessage, ticker string) SocialEnvel
 	return SocialEnvelope{
 		ID:         strconv.FormatInt(raw.ID, 10),
 		Ticker:     strings.ToUpper(ticker),
-		Source:     "stocktwits",
+		Source:     "STOCKTWITS",
 		Stage:      "RAW",
 		FilingDate: fd,
 		Payload:    slim,

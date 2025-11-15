@@ -425,7 +425,7 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 		return fmt.Errorf("ticker required")
 	}
 	ticker := strings.ToUpper(args.Ticker)
-	source := "youtube"
+	source := "YOUTUBE"
 	ownerID := jobID
 
 	store, err := NewDynamoStore(ctx)
@@ -440,7 +440,7 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 
 	emitMeta := func(eventType string, extra map[string]interface{}) {
 		rec := map[string]interface{}{
-			"stage":  StageEvents,
+			"stage":  stageMetadata,
 			"type":   eventType,
 			"source": source,
 			"ticker": ticker,

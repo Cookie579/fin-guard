@@ -103,10 +103,10 @@ const (
 	// lake to partition raw records separately from control plane events.
 	StageRaw = "RAW"
 
-	// StageEvents indicates that a record is a control-plane event (job
+	// stageMetadata indicates that a record is a control-plane event (job
 	// lifecycle or batch progress). Metadata events emitted by the runners
 	// should include this value in their "stage" field so that they can be
 	// routed to a separate stage prefix in S3. If you prefer to keep
-	// events in RAW alongside data records, set StageEvents = StageRaw.
-	StageEvents = "EVENTS"
+	// events in RAW alongside data records, set stageMetadata = StageRaw.
+	stageMetadata = "METADATA"
 )

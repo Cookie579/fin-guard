@@ -31,34 +31,34 @@ func RunESGJob(ctx context.Context, jobID, ingestDate, ticker string, args *esgA
 	if args.Region != "" {
 		os.Setenv("AWS_REGION", args.Region)
 	}
-    // Determine the company record without relying on a static companies.json.
-    // Historically we loaded companies.json to map tickers to human‑friendly
-    // company names. However this configuration file is no longer
-    // consulted. Instead we attempt to look up the company name and CIK
-    // from a dedicated DynamoDB table (company_cik_map). If no record
-    // exists or an error occurs we fall back to using the ticker itself
-    // as both name and ticker. This ensures the ingest proceeds even
-    // when no local metadata is available. Additional metadata (such as
-    // the official domain) is looked up in DynamoDB or discovered on the
-    // fly via domain search.
-    company := &Company{Ticker: ticker, Name: ticker}
-    // Attempt to resolve the full company name from company_cik_map. If
-    // the lookup fails or returns an empty name we retain the ticker as
-    // the company name. The CIK is also populated when available.
-    if store, err := NewCompanyCIKMapStore(ctx); err == nil {
-        if name, cik, err2 := store.GetCompanyName(ctx, ticker); err2 == nil && name != "" {
-            company.Name = name
-            // Populate the CIK if present. Note that Company.CIK is not used
-            // elsewhere in the ingest but storing it here simplifies
-            // debugging and potential future enhancements.
-            company.CIK = cik
-            log.Printf("ℹ️ using company name %s for ticker %s", name, ticker)
-        } else {
-            log.Printf("ℹ️ using ticker %s as company name", ticker)
-        }
-    } else {
-        log.Printf("ℹ️ using ticker %s as company name", ticker)
-    }
+	// Determine the company record without relying on a static companies.json.
+	// Historically we loaded companies.json to map tickers to human‑friendly
+	// company names. However this configuration file is no longer
+	// consulted. Instead we attempt to look up the company name and CIK
+	// from a dedicated DynamoDB table (company_cik_map). If no record
+	// exists or an error occurs we fall back to using the ticker itself
+	// as both name and ticker. This ensures the ingest proceeds even
+	// when no local metadata is available. Additional metadata (such as
+	// the official domain) is looked up in DynamoDB or discovered on the
+	// fly via domain search.
+	company := &Company{Ticker: ticker, Name: ticker}
+	// Attempt to resolve the full company name from company_cik_map. If
+	// the lookup fails or returns an empty name we retain the ticker as
+	// the company name. The CIK is also populated when available.
+	if store, err := NewCompanyCIKMapStore(ctx); err == nil {
+		if name, cik, err2 := store.GetCompanyName(ctx, ticker); err2 == nil && name != "" {
+			company.Name = name
+			// Populate the CIK if present. Note that Company.CIK is not used
+			// elsewhere in the ingest but storing it here simplifies
+			// debugging and potential future enhancements.
+			company.CIK = cik
+			log.Printf("ℹ️ using company name %s for ticker %s", name, ticker)
+		} else {
+			log.Printf("ℹ️ using ticker %s as company name", ticker)
+		}
+	} else {
+		log.Printf("ℹ️ using ticker %s as company name", ticker)
+	}
 
 	// Before performing any ESG scraping we consult the domain cache to
 	// determine whether a domain has previously been discovered for this
@@ -118,11 +118,11 @@ func RunESGJob(ctx context.Context, jobID, ingestDate, ticker string, args *esgA
 	// the broker, deduplicate results and emit records to S3 and Kinesis.
 	if args.Mode == "esg" || args.Mode == "esg+domain" {
 		log.Printf("🔍 Serper ESG search for %s …", company.Name)
-        // Pass through the minimum number of new records requested via
-        // args.MinNew. SearchESGLinks will attempt to gather at least this
-        // many unique results by expanding its search across years when
-        // possible.
-        results, err := SearchESGLinks(company.Name, cfg, args.MinNew)
+		// Pass through the minimum number of new records requested via
+		// args.MinNew. SearchESGLinks will attempt to gather at least this
+		// many unique results by expanding its search across years when
+		// possible.
+		results, err := SearchESGLinks(company.Name, cfg, args.MinNew)
 		if err != nil {
 			log.Printf("search %s: %v", ticker, err)
 			return err
@@ -160,15 +160,15 @@ func RunESGJob(ctx context.Context, jobID, ingestDate, ticker string, args *esgA
 			if already {
 				continue
 			}
-        // Fallback deduplication via S3 listing. In the v2 code we avoid
-        // the nil check on seenS3 because reading from a nil map in Go
-        // safely returns the zero value. Removing the nil comparison also
-        // avoids linter warnings about impossible conditions when the map
-        // is never initialised. If useS3Fallback is false the following
-        // condition short‑circuits and no lookup occurs.
-        if useS3Fallback && seenS3[item.Link] {
-            continue
-        }
+			// Fallback deduplication via S3 listing. In the v2 code we avoid
+			// the nil check on seenS3 because reading from a nil map in Go
+			// safely returns the zero value. Removing the nil comparison also
+			// avoids linter warnings about impossible conditions when the map
+			// is never initialised. If useS3Fallback is false the following
+			// condition short‑circuits and no lookup occurs.
+			if useS3Fallback && seenS3[item.Link] {
+				continue
+			}
 			// Blacklist filtering
 			if u, err := url.Parse(item.Link); err == nil {
 				h := u.Hostname()
@@ -190,7 +190,7 @@ func RunESGJob(ctx context.Context, jobID, ingestDate, ticker string, args *esgA
 				URL:      item.Link,
 				IngestTS: time.Now().UTC().Format(time.RFC3339),
 				Source:   "ESG",
-				Stage:    "raw",
+				Stage:    "RAW",
 			}
 			if d := inferDateFromURL(item.Link); d != "" {
 				rec.FilingDate = d
