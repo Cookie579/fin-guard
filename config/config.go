@@ -9,6 +9,7 @@ type Config struct {
 	GoogleAPIKeys []string `json:"google_api_keys"`
 	GoogleAPIKey  string   `json:"google_api_key"`
 	SerperAPIKey  string   `json:"serper_api_key"`
+	SerperKeys    []string `json:"serper_keys"`
 
 	// Fallback: finguard-esg (esg.finguard@gmail.com) | 1: finguard-esg-2
 	GoogleCX      string `json:"google_cx"`

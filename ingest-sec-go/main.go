@@ -1,15 +1,22 @@
 package main
 
 import (
-	"context"
-	"flag"
-	"log"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"strings"
+    "context"
+    "encoding/json"
+    "flag"
+    "log"
+    "os"
+    "os/exec"
+    "path/filepath"
+    "strings"
+    "time"
+    "fmt"
 
-	"github.com/Cookie579/fin-guard/utils"
+    "github.com/Cookie579/fin-guard/utils"
+    "github.com/aws/aws-sdk-go/aws"
+    "github.com/aws/aws-sdk-go/aws/session"
+    "github.com/aws/aws-sdk-go/service/kinesis"
+    "github.com/google/uuid"
 )
 
 // main serves as the entrypoint for the ingest-sec-go binary. It supports
@@ -28,6 +35,11 @@ import (
 func main() {
 	log.Println("🚀 Starting ingest-sec-go...")
 
+    // Generate a unique job ID for this ingest run. The job ID is used
+    // when emitting control‑plane metadata events to Kinesis. We use a
+    // UUID to avoid collisions between multiple concurrent jobs.
+    jobID := uuid.New().String()
+
 	// --ticker enables single-ticker mode
 	tickerFlag := flag.String("ticker", "", "Stock ticker symbol to process (optional)")
 	flag.Parse()
@@ -37,6 +49,12 @@ func main() {
 	if *tickerFlag != "" {
 		// Single ticker mode
 		ticker := strings.ToUpper(*tickerFlag)
+
+        // Emit a job_started metadata event before any processing. This
+        // allows downstream systems to detect when a SEC ingest run has
+        // commenced. If the emit fails it is logged but does not abort
+        // the job.
+        emitMeta("job_started", ticker, jobID, nil)
 
 		// DynamoDB CIK store (best-effort)
 		var cikStore *CompanyCikStore
@@ -80,7 +98,9 @@ func main() {
 				} else {
 					// 4) No CIK → exit gracefully (code 0). Job won't be marked failed.
 					log.Printf("⚠️ Failed to resolve CIK for %s via remote lookup: %v; skipping filings", ticker, err2)
-					return
+                    // Emit job_failed event before exiting
+                    emitMeta("job_failed", ticker, jobID, map[string]any{"error": fmt.Sprintf("no CIK for %s", ticker)})
+                    return
 				}
 			}
 		}
@@ -93,7 +113,9 @@ func main() {
 		if err != nil {
 			// Do not hard-fail the Job; log and exit cleanly
 			log.Printf("⚠️ Error fetching filings for %s: %v; no filings will be emitted", company.Name, err)
-			return
+            // Emit job_failed event before exiting
+            emitMeta("job_failed", ticker, jobID, map[string]any{"error": fmt.Sprintf("fetch filings: %v", err)})
+            return
 		}
 
 		log.Printf("📦 %d filings found for %s", len(filings), company.Name)
@@ -109,6 +131,8 @@ func main() {
 				log.Printf("✅ Saved to S3: %s (%s)", filing.Company, filing.Form)
 			}
 		}
+        // Emit job_completed metadata event once all filings have been processed
+        emitMeta("job_completed", ticker, jobID, map[string]any{"records": len(filings)})
 		return
 	}
 
@@ -135,4 +159,47 @@ func main() {
 	if err := cmd.Run(); err != nil {
 		log.Fatalf("❌ Failed to start orchestrator: %v", err)
 	}
+}
+
+// emitMeta sends a control‑plane metadata event to Kinesis. These events
+// signal job lifecycle stages (job_started, job_completed, job_failed)
+// and carry optional extra fields. Events are written to the
+// fin-guard-stream under a METADATA stage prefix so that the data lake
+// can partition them separately from raw filings. Any failure to
+// publish the event is logged but does not interrupt the caller.
+func emitMeta(eventType, ticker, jobID string, extra map[string]any) {
+    rec := map[string]any{
+        "stage":  "METADATA",
+        "type":   eventType,
+        "source": "SEC",
+        "ticker": strings.ToUpper(ticker),
+        "job_id": jobID,
+        "ts":     time.Now().UTC().Format(time.RFC3339),
+    }
+    if extra != nil {
+        for k, v := range extra {
+            rec[k] = v
+        }
+    }
+    data, err := json.Marshal(rec)
+    if err != nil {
+        log.Printf("WARN: failed to marshal metadata event %s: %v", eventType, err)
+        return
+    }
+    // Determine the AWS region and stream name. We read the region from
+    // the AwsRegion constant and use fin-guard-stream as the stream. If
+    // you need to customize these values, update the constants or add
+    // environment overrides here.
+    sess := session.Must(session.NewSession(&aws.Config{
+        Region: aws.String(AwsRegion),
+    }))
+    svc := kinesis.New(sess)
+    _, err = svc.PutRecord(&kinesis.PutRecordInput{
+        StreamName:   aws.String("fin-guard-stream"),
+        PartitionKey: aws.String(strings.ToUpper(ticker)),
+        Data:         data,
+    })
+    if err != nil {
+        log.Printf("WARN: failed to emit %s event for %s: %v", eventType, ticker, err)
+    }
 }
