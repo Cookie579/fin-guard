@@ -96,7 +96,7 @@ func main() {
 			os.Exit(1)
 		}
 		// Print JOB_STARTED marker prior to any work. Uppercase ticker for consistency.
-		fmt.Printf("JOB_STARTED job_id=%s source=stocktwits ticker=%s\n", jobID, strings.ToUpper(args.Ticker))
+		fmt.Printf("JOB_STARTED job_id=%s source=STOCKTWITS ticker=%s\n", jobID, strings.ToUpper(args.Ticker))
 		// Run the StockTwits job.
 		if err := RunStocktwitsJob(ctx, jobID, ingestDate, args); err != nil {
 			// Determine exit code based on error type.
@@ -130,7 +130,7 @@ func main() {
 			os.Exit(1)
 		}
 		// Print JOB_STARTED marker for YouTube.
-		fmt.Printf("JOB_STARTED job_id=%s source=youtube ticker=%s\n", jobID, strings.ToUpper(args.Ticker))
+		fmt.Printf("JOB_STARTED job_id=%s source=YOUTUBE ticker=%s\n", jobID, strings.ToUpper(args.Ticker))
 		if err := RunYouTubeJob(ctx, jobID, ingestDate, args); err != nil {
 			switch {
 			case errors.Is(err, ErrLockNotAcquired):

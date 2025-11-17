@@ -18,7 +18,7 @@ import (
 // RunStocktwitsJob orchestrates one StockTwits ingest job (forward + backfill).
 func RunStocktwitsJob(ctx context.Context, jobID, ingestDate string, args *stocktwitsArgs) error {
 	ticker := strings.ToUpper(args.Ticker)
-	source := "stocktwits"
+	source := "STOCKTWITS"
 	ownerID := jobID
 
 	store, err := NewDynamoStore(ctx)
