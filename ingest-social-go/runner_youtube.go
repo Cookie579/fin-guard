@@ -650,6 +650,9 @@ func RunYouTubeJob(ctx context.Context, jobID, ingestDate string, args *youtubeA
 		for i := range states {
 			if states[i].Saved >= perTermTarget {
 				states[i].Done = true
+			} else {
+				// Reset Done flag for terms that haven't hit their quota yet
+				states[i].Done = false
 			}
 			states[i].PageToken = ""
 		}

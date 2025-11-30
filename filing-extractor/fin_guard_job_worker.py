@@ -67,9 +67,9 @@ from typing import Dict, Iterable, List, Optional
 
 import boto3  # type: ignore
 
-from .analyze_sec import main as run_sec_analysis  # type: ignore
-from .analyze_esg import main as run_esg_analysis  # type: ignore
-from .analyze_social import SocialAnalyzer  # type: ignore
+from analyze_sec import main as run_sec_analysis  # type: ignore
+from analyze_esg import main as run_esg_analysis  # type: ignore
+from analyze_social import SocialAnalyzer  # type: ignore
 
 
 @dataclass
@@ -79,7 +79,16 @@ class JobEnvelope:
     The analyzers receive messages on their SQS queues whose body is an
     EventBridge event.  The actual job parameters live under
     ``event["detail"]``.  This dataclass extracts and exposes only the
-    relevant fields required to discover and process the data.
+    relevant fields required to discover and process the data.  In
+    addition to the original parameters (job id, type, ticker, time
+    window, priority and raw payload), an optional ``reprocess`` flag
+    indicates whether the analyzer should ignore the processed flag on
+    partitions.  When ``reprocess`` is truthy the worker will
+    re‑analyze all partitions regardless of their current processed
+    status.  Otherwise, only those partitions with ``processed`` set
+    to ``False`` or missing are considered.  This flag supports the
+    "redo everything from scratch" use case described in the system
+    design.
 
     Attributes
     ----------
@@ -97,6 +106,9 @@ class JobEnvelope:
     priority : Optional[str]
         Priority hint used by upstream scheduling.  The worker currently
         ignores this field but could use it to prioritise urgent jobs.
+    reprocess : bool
+        If ``True``, force re‑processing of all partitions for this job.
+        Defaults to ``False`` when unspecified in the incoming event.
     raw : Dict[str, object]
         The original ``detail`` dict from the EventBridge event.  This
         allows downstream processors to access additional fields without
@@ -109,6 +121,7 @@ class JobEnvelope:
     window_from: Optional[str]
     window_to: Optional[str]
     priority: Optional[str]
+    reprocess: bool
     raw: Dict[str, object]
 
 
@@ -281,6 +294,20 @@ class BaseJobWorker:
         window_from = window.get("from")
         window_to = window.get("to")
         priority = detail.get("priority")
+        # Determine whether this job should reprocess all partitions.  Upstream
+        # events may include a boolean "reprocess" field in the detail
+        # payload.  If absent, default to False.  We coerce any truthy
+        # value to ``True`` for convenience.
+        reprocess_val = detail.get("reprocess")
+        reprocess: bool = False
+        if isinstance(reprocess_val, bool):
+            reprocess = reprocess_val
+        elif isinstance(reprocess_val, str):
+            # Accept common truthy strings such as "true", "1", "yes".
+            reprocess = reprocess_val.lower() in {"true", "1", "yes", "y"}
+        elif reprocess_val is not None:
+            # Fallback: any non‑None value is considered truthy
+            reprocess = True
         return JobEnvelope(
             job_id=job_id,
             type=job_type,
@@ -288,6 +315,7 @@ class BaseJobWorker:
             window_from=window_from,
             window_to=window_to,
             priority=priority,
+            reprocess=reprocess,
             raw=detail,
         )
 
@@ -298,44 +326,75 @@ class BaseJobWorker:
 
         * Build the DynamoDB partition key (``PK``) for the given ticker.
         * Query the table for all partitions associated with that ticker.
-        * Filter partitions by logical type and optional time window.
+        * Filter partitions by logical type, optional time window and processed
+          status.  Unless ``job.reprocess`` is truthy, only partitions
+          where ``processed`` is either ``False`` or missing are considered.
+        * Convert DynamoDB attributes to plain Python types for the
+          downstream analyser.
         * Invoke the type‑specific ``_process_partition`` on each match.
-        * Optionally update the partition's processed status in DynamoDB.
+        * Mark each processed partition in DynamoDB using a conditional
+          update that sets ``processed = True`` and records a
+          ``processed_at`` timestamp.  The conditional update protects
+          against races by requiring that ``processed`` is either absent
+          or currently ``False``.  When ``job.reprocess`` is ``True`` the
+          partitions are left untouched so that their state remains
+          unchanged.
         """
         pk = f"TICKER#{job.ticker}"
         # Query DynamoDB for all items with the same PK.  We use
         # projection expression to limit the returned attributes.  The
         # sort key (SK) encodes the logical type and timestamp.
-        response = self._dynamo.query(
-            TableName=self.table_name,
-            KeyConditionExpression="PK = :pk",
-            ExpressionAttributeValues={":pk": {"S": pk}},
-        )
+        # Determine the sort key prefix for this analyzer type.  The SK is
+        # structured as ``SRC#<TYPE>#<timestamp>``.  Using ``begins_with``
+        # narrows the query to only those partitions relevant to this
+        # analyzer.  Without this filter DynamoDB would return all items
+        # for the ticker, including other types, which we would then
+        # discard in Python.
+        sk_prefix = f"SRC#{self.analyzer_type}#"
+        # Build the base query arguments.  We always specify the PK and
+        # prefix condition.  When reprocessing is disabled we include a
+        # filter expression to exclude already processed partitions.  This
+        # reduces the amount of data returned and offloads filtering to
+        # DynamoDB rather than Python.
+        query_kwargs: Dict[str, object] = {
+            "TableName": self.table_name,
+            "KeyConditionExpression": "PK = :pk AND begins_with(SK, :sk_pref)",
+            "ExpressionAttributeValues": {
+                ":pk": {"S": pk},
+                ":sk_pref": {"S": sk_prefix},
+            },
+        }
+        # Only include the filter to exclude processed items when not
+        # explicitly reprocessing.  ``attribute_not_exists(processed)``
+        # covers the case where the flag has never been set.  However,
+        # ``processed`` is a reserved keyword in DynamoDB, so we must
+        # reference it via an expression attribute name.  Using
+        # ``#p`` as a placeholder allows the query to succeed.  See
+        # https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/ReservedWords.html
+        # for a list of reserved words.
+        expr_attr_names: Optional[Dict[str, str]] = None
+        filter_expr: Optional[str] = None
+        if not job.reprocess:
+            # Define a placeholder for the reserved attribute name
+            expr_attr_names = {"#p": "processed"}
+            # Only return items that have not been processed yet
+            filter_expr = "(#p = :false) OR attribute_not_exists(#p)"
+            # Append the boolean value for :false to the existing
+            # ExpressionAttributeValues dict
+            query_kwargs["ExpressionAttributeValues"][":false"] = {"BOOL": False}
+        # Attach the expression attribute names and filter expression if defined
+        if expr_attr_names:
+            query_kwargs["ExpressionAttributeNames"] = expr_attr_names
+        if filter_expr:
+            query_kwargs["FilterExpression"] = filter_expr
+        # Execute the query.  In a production deployment you may need to
+        # handle pagination via LastEvaluatedKey; for simplicity we assume
+        # that a single query will return all relevant items.
+        response = self._dynamo.query(**query_kwargs)
         items = response.get("Items", [])
         for item in items:
-            logical_type = item.get("logical_type", {}).get("S")
-            if not logical_type or logical_type.upper() != self.analyzer_type:
-                continue
-            # Extract the timestamp from the sort key or from first_seen_at if present.
-            timestamp_iso: Optional[str] = None
-            sk = item.get("SK", {}).get("S")
-            if sk and "#" in sk:
-                *_, ts = sk.split("#", 2)
-                timestamp_iso = ts
-            if not timestamp_iso:
-                ts_attr = item.get("first_seen_at") or item.get("last_seen_at")
-                if ts_attr and "S" in ts_attr:
-                    timestamp_iso = ts_attr["S"]
-            # Filter by window if provided
-            if job.window_from or job.window_to:
-                if not timestamp_iso:
-                    continue
-                ts_dt = datetime.fromisoformat(timestamp_iso)
-                if job.window_from and ts_dt < datetime.fromisoformat(job.window_from):
-                    continue
-                if job.window_to and ts_dt > datetime.fromisoformat(job.window_to):
-                    continue
-            # Convert DynamoDB attributes to a plain dict for convenience
+            # Convert DynamoDB attributes to a plain dict for convenience.
+            # Preserve booleans as Python bools and strings as Python str.
             partition: Dict[str, object] = {}
             for key, val in item.items():
                 if isinstance(val, dict) and "S" in val:
@@ -343,23 +402,61 @@ class BaseJobWorker:
                 elif isinstance(val, dict) and "BOOL" in val:
                     partition[key] = val["BOOL"]
                 else:
-                    # Leave other attribute types as is
                     partition[key] = val
+            # Extract the timestamp from the sort key or from first_seen_at if present.
+            timestamp_iso: Optional[str] = None
+            sk = item.get("SK", {}).get("S")  # type: ignore[assignment]
+            if sk and "#" in sk:
+                # SK structure: SRC#<TYPE>#<timestamp>
+                parts = sk.split("#", 2)
+                if len(parts) == 3:
+                    timestamp_iso = parts[2]
+            if not timestamp_iso:
+                ts_attr = item.get("first_seen_at") or item.get("last_seen_at")
+                if ts_attr and isinstance(ts_attr, dict) and "S" in ts_attr:
+                    timestamp_iso = ts_attr["S"]  # type: ignore[assignment]
+            # Filter by the job's time window if specified.  The timestamps
+            # are ISO 8601 strings; convert to datetime for comparisons.
+            if job.window_from or job.window_to:
+                if not timestamp_iso:
+                    continue
+                try:
+                    ts_dt = datetime.fromisoformat(timestamp_iso.rstrip("Z"))
+                except Exception:
+                    continue
+                if job.window_from:
+                    try:
+                        if ts_dt < datetime.fromisoformat(job.window_from.rstrip("Z")):
+                            continue
+                    except Exception:
+                        pass
+                if job.window_to:
+                    try:
+                        if ts_dt > datetime.fromisoformat(job.window_to.rstrip("Z")):
+                            continue
+                    except Exception:
+                        pass
+            # Process the partition.  Any exceptions bubble up to the caller and
+            # will result in the SQS message being retried.
             self._process_partition(partition, job)
-            # Optionally mark partition processed.  We set a Boolean flag
-            # ``processed`` to True.  This is safe even if the flag does not
-            # exist yet because DynamoDB will add it on update.  If a
-            # timestamp attribute is preferred, extend this accordingly.
-            try:
-                self._dynamo.update_item(
-                    TableName=self.table_name,
-                    Key={"PK": {"S": pk}, "SK": {"S": item["SK"]["S"]}},
-                    UpdateExpression="SET processed = :p",
-                    ExpressionAttributeValues={":p": {"BOOL": True}},
-                )
-            except Exception:
-                # Best effort; failures here should not halt processing
-                pass
+            # If not reprocessing, mark this partition as processed with a timestamp.
+            if not job.reprocess:
+                now_iso = datetime.utcnow().isoformat() + "Z"
+                try:
+                    self._dynamo.update_item(
+                        TableName=self.table_name,
+                        Key={"PK": {"S": pk}, "SK": {"S": item["SK"]["S"]}},
+                        UpdateExpression="SET processed = :true, processed_at = :ts",
+                        ConditionExpression="attribute_not_exists(processed) OR processed = :false",
+                        ExpressionAttributeValues={
+                            ":true": {"BOOL": True},
+                            ":false": {"BOOL": False},
+                            ":ts": {"S": now_iso},
+                        },
+                    )
+                except Exception:
+                    # Best effort; failures here should not halt processing
+                    pass
 
 
 class SecJobWorker(BaseJobWorker):
@@ -372,52 +469,88 @@ class SecJobWorker(BaseJobWorker):
     def _process_partition(self, partition: Dict[str, object], job: JobEnvelope) -> None:
         """Run SEC analysis on a single partition.
 
-        The SEC analyzer operates on plain text files.  Raw SEC data in the
-        data lake is stored as Parquet files containing one or more
-        columns.  This implementation downloads the Parquet file from S3,
-        extracts the ``content`` column (assumed to contain the filing
-        text), writes it to a temporary local file and then invokes the
-        existing ``run_sec_analysis`` function.  The results are uploaded
-        back to S3 under ``<output_bucket>/<output_prefix>/<ticker>/SEC/``.
+        The SEC Parquet may either:
 
-        If the Parquet schema differs from this assumption you can
-        override this method to perform the appropriate extraction.
+        * already contain a ``content`` column with plain text, or
+        * contain a ``txt_bytes`` column with raw filing text bytes.
+
+        This method reads the Parquet from S3, normalises it to a
+        ``content`` column, concatenates all rows into a single text
+        blob and runs the existing SEC analysis.  Results are written
+        back to S3 under ``<output_prefix>/<ticker>/SEC/``.
         """
         bucket = partition.get("bucket")
         key = partition.get("key")
         if not isinstance(bucket, str) or not isinstance(key, str):
             raise ValueError("Partition is missing S3 location")
-        # Download the Parquet file to memory
+
+        # Download Parquet bytes from S3
         obj = self._s3.get_object(Bucket=bucket, Key=key)
         body = obj["Body"].read()
-        # Load into pandas to extract text.  We read the entire file
-        # because SEC filings are generally small enough to fit in memory.
+
+        import io
         import pandas as pd  # type: ignore
-        import pyarrow.parquet as pq  # type: ignore
-        table = pq.read_table(source=body)
-        df = table.to_pandas()
+
+        # Read Parquet from in-memory buffer
+        df = pd.read_parquet(io.BytesIO(body))
+
+        # Normalise to a 'content' column
         if "content" not in df.columns:
-            raise KeyError(f"Parquet file {key} lacks a 'content' column")
-        # Concatenate all rows into a single text string.  Some filings
-        # may include multiple parts; join them with double newlines.
+            if "txt_bytes" in df.columns:
+                def _decode(b: object) -> str:
+                    if isinstance(b, (bytes, bytearray)):
+                        try:
+                            return b.decode("utf-8", errors="replace")
+                        except Exception:
+                            return ""
+                    return "" if b is None else str(b)
+                df["content"] = df["txt_bytes"].apply(_decode)
+            else:
+                raise KeyError(
+                    f"Parquet file {key} lacks a 'content' or 'txt_bytes' column"
+                )
+
+        # Concatenate all rows into a single text string
         text_data = "\n\n".join(df["content"].astype(str).tolist())
-        # Write to a temporary file on the local filesystem.  Using the
-        # job_id ensures uniqueness and aids debugging.
-        tmp_dir = "/tmp/fin_guard_sec"
+
+        # Write to a temporary file on the local filesystem.  Use a
+        # cross-platform temp directory and sanitise the job id to avoid
+        # illegal filename characters (e.g. ':' on Windows).
+        import tempfile
+        import re
+
+        tmp_root = tempfile.gettempdir()
+        tmp_dir = os.path.join(tmp_root, "fin_guard_sec")
         os.makedirs(tmp_dir, exist_ok=True)
-        tmp_path = os.path.join(tmp_dir, f"{job.job_id}.txt")
+        # Determine the filing date.  If a window is provided, use its date
+        # component; otherwise derive it from the job id.  Sanitise any
+        # illegal characters (e.g. ':' on Windows).
+        window_date_raw: str
+        if job.window_from:
+            window_date_raw = job.window_from.split("T")[0]
+        else:
+            # job.job_id is of the form <ticker>-<type>-<timestamp>.  Extract
+            # the timestamp portion and drop the time component for the date.
+            parts = job.job_id.split("-", 2)
+            if len(parts) == 3 and "T" in parts[2]:
+                window_date_raw = parts[2].split("T")[0]
+            else:
+                window_date_raw = job.job_id  # fallback
+        safe_window_date = re.sub(r'[:\\/]', '-', window_date_raw)
+        # Construct the temporary filename and output filename using the
+        # expected SEC naming convention: <Company>__<YYYY-MM-DD>__SEC.txt/json
+        tmp_filename = f"{job.ticker}__{safe_window_date}__SEC.txt"
+        tmp_path = os.path.join(tmp_dir, tmp_filename)
         with open(tmp_path, "w", encoding="utf-8") as fh:
             fh.write(text_data)
-        # Construct output filename based on ticker and job window.  We
-        # reuse the existing convention: ``<ticker>__<YYYY-MM-DD>__10-K.json``.
-        window_date = job.window_from.split("T")[0] if job.window_from else job.job_id
-        out_fname = f"{job.ticker}__{window_date}__SEC.json"
+
+        out_fname = f"{job.ticker}__{safe_window_date}__SEC.json"
         out_local = os.path.join(tmp_dir, out_fname)
-        # Run the existing SEC analysis.  This writes JSON to the
-        # specified output file.
+
+        # Run existing SEC analysis
         run_sec_analysis(input_file=tmp_path, output_file=out_local)
-        # Upload the results back to S3.  Store under
-        # ``<output_prefix>/<ticker>/SEC/<filename>``.
+
+        # Upload results to S3
         dest_key = f"{self.output_prefix}/{job.ticker}/SEC/{out_fname}"
         with open(out_local, "rb") as fh:
             self._s3.upload_fileobj(fh, self.output_bucket, dest_key)
@@ -445,20 +578,30 @@ class EsgJobWorker(BaseJobWorker):
             raise ValueError("Partition is missing S3 location")
         obj = self._s3.get_object(Bucket=bucket, Key=key)
         body = obj["Body"].read()
+
+        import io
         import pandas as pd  # type: ignore
-        import pyarrow.parquet as pq  # type: ignore
-        table = pq.read_table(source=body)
-        df = table.to_pandas()
+
+        df = pd.read_parquet(io.BytesIO(body))
         if "content" not in df.columns:
             raise KeyError(f"Parquet file {key} lacks a 'content' column")
         text_data = "\n\n".join(df["content"].astype(str).tolist())
-        tmp_dir = "/tmp/fin_guard_esg"
+        # Write to a temporary file using a cross-platform temp directory
+        # and a sanitised job id to avoid invalid filename characters.
+        import tempfile
+        import re
+
+        tmp_root = tempfile.gettempdir()
+        tmp_dir = os.path.join(tmp_root, "fin_guard_esg")
         os.makedirs(tmp_dir, exist_ok=True)
-        tmp_path = os.path.join(tmp_dir, f"{job.job_id}.txt")
+        safe_job_id = re.sub(r'[:\\/]', '-', job.job_id)
+        tmp_path = os.path.join(tmp_dir, f"{safe_job_id}.txt")
         with open(tmp_path, "w", encoding="utf-8") as fh:
             fh.write(text_data)
-        window_date = job.window_from.split("T")[0] if job.window_from else job.job_id
-        out_fname = f"{job.ticker}__{window_date}__ESG.json"
+        # Construct output filename; sanitise the date portion if using the job id
+        window_date_raw = job.window_from.split("T")[0] if job.window_from else job.job_id
+        safe_window_date = re.sub(r'[:\\/]', '-', window_date_raw)
+        out_fname = f"{job.ticker}__{safe_window_date}__ESG.json"
         out_local = os.path.join(tmp_dir, out_fname)
         # run_esg_analysis requires both input and output paths
         run_esg_analysis(input_file=tmp_path, output_file=out_local)
@@ -492,10 +635,11 @@ class SocialJobWorker(BaseJobWorker):
             raise ValueError("Partition is missing S3 location")
         obj = self._s3.get_object(Bucket=bucket, Key=key)
         body = obj["Body"].read()
+
+        import io
         import pandas as pd  # type: ignore
-        import pyarrow.parquet as pq  # type: ignore
-        table = pq.read_table(source=body)
-        df = table.to_pandas()
+
+        df = pd.read_parquet(io.BytesIO(body))
         # Validate required columns
         if not {"timestamp", "content"}.issubset(df.columns):
             raise KeyError(
@@ -506,10 +650,15 @@ class SocialJobWorker(BaseJobWorker):
         analyser = SocialAnalyzer()
         metrics = analyser.compute_features(posts)
         # Use the job_id as part of the filename.  If the window is set
-        # to a single day, incorporate it for clarity.
-        window_date = job.window_from.split("T")[0] if job.window_from else job.job_id
-        out_fname = f"{job.ticker}__{window_date}__SOCIAL.json"
-        tmp_dir = "/tmp/fin_guard_social"
+        # to a single day, incorporate it for clarity.  Sanitise the
+        # date portion to avoid invalid filename characters (e.g. ':' on Windows).
+        import tempfile
+        import re
+        window_date_raw = job.window_from.split("T")[0] if job.window_from else job.job_id
+        safe_window_date = re.sub(r'[:\\/]', '-', window_date_raw)
+        out_fname = f"{job.ticker}__{safe_window_date}__SOCIAL.json"
+        tmp_root = tempfile.gettempdir()
+        tmp_dir = os.path.join(tmp_root, "fin_guard_social")
         os.makedirs(tmp_dir, exist_ok=True)
         out_local = os.path.join(tmp_dir, out_fname)
         with open(out_local, "w", encoding="utf-8") as fh:

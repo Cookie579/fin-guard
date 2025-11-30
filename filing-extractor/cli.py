@@ -129,6 +129,11 @@ def _run_pipeline(
     ticker: Optional[str],
     data_root: Optional[str] = None,
     fetch_only: bool = False,
+    *,
+    use_dynamo: bool = False,
+    dynamo_table: str = "fin_guard_partitions",
+    dynamo_region: Optional[str] = None,
+    reprocess: bool = False,
 ) -> None:
     """Run the full FinGuard pipeline and print the resulting feature rows.
 
@@ -166,22 +171,65 @@ def _run_pipeline(
     # populate the texts and social directories with the latest filings and
     # posts prior to running the pipeline.
     if ticker:
-        from fetch import fetch_sec_for_ticker, fetch_esg_for_ticker, fetch_social_for_ticker  # type: ignore
-        # When data_root is an S3 URI we pass it through unchanged as a string; for local
-        # roots we wrap in Path.  If no data_root is supplied, default to ``datalake/events``.
-        base = data_root if data_root is not None else Path("datalake/events")
-        try:
-            fetch_sec_for_ticker(ticker, data_root=base)
-        except Exception as exc:
-            print(f"⚠️  SEC fetch failed: {exc}")
-        try:
-            fetch_esg_for_ticker(ticker, data_root=base)
-        except Exception as exc:
-            print(f"⚠️  ESG fetch failed: {exc}")
-        try:
-            fetch_social_for_ticker(ticker, data_root=base)
-        except Exception as exc:
-            print(f"⚠️  Social fetch failed: {exc}")
+        if use_dynamo:
+            # Fetch SEC manifests from DynamoDB partitions
+            try:
+                from fetch import (
+                    fetch_sec_for_ticker_from_partitions,
+                    fetch_esg_for_ticker_from_partitions,
+                    fetch_social_for_ticker_from_partitions,
+                )  # type: ignore
+            except Exception as exc:
+                raise ImportError("fetch module could not be imported") from exc
+            # Fetch SEC partitions from DynamoDB
+            try:
+                fetch_sec_for_ticker_from_partitions(
+                    ticker,
+                    table_name=dynamo_table,
+                    aws_region=dynamo_region,
+                    reprocess=reprocess,
+                )
+            except Exception as exc:
+                print(f"⚠️  SEC fetch from Dynamo failed: {exc}")
+            # Fetch ESG partitions from DynamoDB
+            try:
+                fetch_esg_for_ticker_from_partitions(
+                    ticker,
+                    table_name=dynamo_table,
+                    aws_region=dynamo_region,
+                    reprocess=reprocess,
+                )
+            except Exception as exc:
+                print(f"⚠️  ESG fetch from Dynamo failed: {exc}")
+            # Fetch Social partitions from DynamoDB
+            try:
+                fetch_social_for_ticker_from_partitions(
+                    ticker,
+                    table_name=dynamo_table,
+                    aws_region=dynamo_region,
+                    reprocess=reprocess,
+                )
+            except Exception as exc:
+                print(f"⚠️  Social fetch from Dynamo failed: {exc}")
+        else:
+            # Default local fetch
+            try:
+                from fetch import fetch_sec_for_ticker, fetch_esg_for_ticker, fetch_social_for_ticker  # type: ignore
+            except Exception as exc:
+                raise ImportError("fetch module could not be imported") from exc
+            base = data_root if data_root is not None else Path("datalake/events")
+            try:
+                fetch_sec_for_ticker(ticker, data_root=base)
+            except Exception as exc:
+                print(f"⚠️  SEC fetch failed: {exc}")
+            try:
+                fetch_esg_for_ticker(ticker, data_root=base)
+            except Exception as exc:
+                print(f"⚠️  ESG fetch failed: {exc}")
+            try:
+                fetch_social_for_ticker(ticker, data_root=base)
+            except Exception as exc:
+                print(f"⚠️  Social fetch failed: {exc}")
         # If the user only wanted to fetch data, return early
         if fetch_only:
             return
@@ -272,6 +320,8 @@ def _run_pipeline(
                 generate_sec_time_charts(rows, charts_root)
             except Exception as exc:
                 print(f"⚠️  Failed to generate SEC charts: {exc}")
+
+
 
 
 def main(argv: Optional[list[str]] = None) -> None:
@@ -370,6 +420,37 @@ def main(argv: Optional[list[str]] = None) -> None:
         help="Only fetch raw data for the specified ticker without running the pipeline",
     )
 
+    # Dynamo options for pipeline
+    pipeline_parser.add_argument(
+        "--dynamo-table",
+        default="fin_guard_partitions",
+        help=(
+            "DynamoDB table containing fin_guard partitions (default: fin_guard_partitions)"
+        ),
+    )
+    pipeline_parser.add_argument(
+        "--dynamo-region",
+        default=None,
+        help=(
+            "AWS region for DynamoDB (use default AWS config if omitted)"
+        ),
+    )
+    pipeline_parser.add_argument(
+        "--use-dynamo",
+        action="store_true",
+        help=(
+            "Use DynamoDB fin_guard_partitions as the source of manifests instead of walking data_root"
+        ),
+    )
+    pipeline_parser.add_argument(
+        "--reprocess",
+        action="store_true",
+        help=(
+            "If set, ignore partition processed flag and re-fetch all manifests for this ticker"
+        ),
+    )
+
+
     args = parser.parse_args(argv)
 
     # Activate local mode if requested.  Downstream modules may read
@@ -410,6 +491,10 @@ def main(argv: Optional[list[str]] = None) -> None:
             args.ticker,
             data_root=args.data_root,
             fetch_only=args.fetch_only,
+            use_dynamo=args.use_dynamo,
+            dynamo_table=args.dynamo_table,
+            dynamo_region=args.dynamo_region,
+            reprocess=args.reprocess,
         )
     else:
         parser.print_help()

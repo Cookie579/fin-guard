@@ -462,6 +462,562 @@ def fetch_sec_for_ticker(
     return results
 
 
+# ---------------------------------------------------------------------------
+# DynamoDB-backed SEC fetch
+# ---------------------------------------------------------------------------
+
+def fetch_sec_for_ticker_from_partitions(
+    ticker: str,
+    *,
+    table_name: str = "fin_guard_partitions",
+    aws_region: Optional[str] = None,
+    reprocess: bool = False,
+) -> List[Path]:
+    """
+    Fetch SEC filings for a ticker using fin_guard_partitions as the source of
+    manifests. For each unprocessed SEC partition in DynamoDB:
+
+      * Download the Parquet manifest from S3.
+      * For each row with `company`, `filingdate`, `form`, `url`, call save_filing(...).
+      * If successful, mark the partition as processed=true with a conditional update.
+
+    Returns the list of text file Paths saved by save_filing.
+
+    Parameters
+    ----------
+    ticker : str
+        Company ticker symbol to fetch filings for.  Case-insensitive.
+    table_name : str, optional
+        DynamoDB table containing fin_guard partitions.  Defaults to
+        ``fin_guard_partitions``.
+    aws_region : str or None, optional
+        AWS region for DynamoDB.  If ``None``, the default boto3 region is used.
+    reprocess : bool, optional
+        Whether to ignore the ``processed`` flag and re-fetch all partitions.
+
+    Returns
+    -------
+    list[pathlib.Path]
+        List of paths to saved filing text files.
+    """
+    from pathlib import Path  # local import to avoid circular import
+    import boto3
+    import io
+    import pandas as pd  # type: ignore
+    from datetime import datetime, timezone
+
+    # Initialise clients
+    dynamo = boto3.client("dynamodb", region_name=aws_region) if aws_region else boto3.client("dynamodb")
+    s3 = boto3.client("s3")
+
+    # Build the partition key for this ticker
+    pk = f"TICKER#{ticker.upper()}"
+
+    # Expression attribute names and values for query
+    # Expression attribute names and values for query
+    expr_attr_names = {"#sk": "SK"}
+    expr_attr_values: Dict[str, Dict[str, Any]] = {
+        ":pk": {"S": pk},
+        ":sec_prefix": {"S": "SRC#SEC#"},
+    }
+    key_condition = "PK = :pk AND begins_with(#sk, :sec_prefix)"
+    filter_expr = None
+    if not reprocess:
+        expr_attr_names["#p"] = "processed"
+        filter_expr = "(#p = :false) OR attribute_not_exists(#p)"
+        expr_attr_values[":false"] = {"BOOL": False}
+    # Query DynamoDB for all SEC partitions for this ticker
+    query_kwargs: Dict[str, Any] = {
+        "TableName": table_name,
+        "KeyConditionExpression": key_condition,
+        "ExpressionAttributeNames": expr_attr_names,
+        "ExpressionAttributeValues": expr_attr_values,
+    }
+    if filter_expr:
+        query_kwargs["FilterExpression"] = filter_expr
+    items: List[Dict[str, Any]] = []
+    while True:
+        resp = dynamo.query(**query_kwargs)
+        items.extend(resp.get("Items", []))
+        if "LastEvaluatedKey" not in resp:
+            break
+        query_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+
+    saved_files: List[Path] = []
+    # Process each partition
+    for it in items:
+        try:
+            bucket = it["bucket"]["S"]
+            key = it["key"]["S"]
+            pk_val = it["PK"]["S"]
+            sk_val = it["SK"]["S"]
+        except Exception:
+            # Skip invalid items
+            continue
+        # Download the Parquet manifest from S3
+        try:
+            obj = s3.get_object(Bucket=bucket, Key=key)
+        except Exception:
+            continue
+        body = obj["Body"].read()
+        try:
+            df = pd.read_parquet(io.BytesIO(body))
+        except Exception:
+            continue
+        # Validate required columns
+        required_cols = {"company", "filingdate", "form", "url"}
+        if not required_cols.issubset(df.columns):
+            # Skip partitions with unexpected schema
+            continue
+        partition_ok = True
+        per_partition_paths: List[Path] = []
+        for _, row in df.iterrows():
+            try:
+                company = str(row["company"])
+                filingdate = str(row["filingdate"])[:10]
+                form = str(row["form"])
+                url = str(row["url"])
+                # Use ticker for the company folder to ensure consistency with other extractors
+                p = save_filing(url, ticker, filingdate, form)
+                per_partition_paths.append(p)
+            except Exception:
+                partition_ok = False
+                break
+        if partition_ok:
+            saved_files.extend(per_partition_paths)
+            # Mark partition as processed
+            now_iso = datetime.now(timezone.utc).isoformat()
+            update_expr = "SET #p = :true, processed_at = :now"
+            cond_expr = "attribute_not_exists(#p) OR #p = :false"
+            try:
+                dynamo.update_item(
+                    TableName=table_name,
+                    Key={"PK": {"S": pk_val}, "SK": {"S": sk_val}},
+                    UpdateExpression=update_expr,
+                    ConditionExpression=cond_expr,
+                    ExpressionAttributeNames={"#p": "processed"},
+                    ExpressionAttributeValues={
+                        ":true": {"BOOL": True},
+                        ":false": {"BOOL": False},
+                        ":now": {"S": now_iso},
+                    },
+                )
+            except Exception:
+                pass
+    return saved_files
+
+
+def fetch_esg_for_ticker_from_partitions(
+    ticker: str,
+    *,
+    table_name: str = "fin_guard_partitions",
+    aws_region: Optional[str] = None,
+    reprocess: bool = False,
+) -> List[Path]:
+    """
+    Fetch ESG reports for a ticker using fin_guard_partitions as the source of
+    manifests.
+
+    This function queries DynamoDB for unprocessed ESG partitions for the given
+    ticker.  For each partition it downloads the associated Parquet manifest
+    from S3, iterates over the rows and attempts to download or derive the
+    textual content of each ESG report.  The text is saved under
+    ``texts/<Company>/ESG/`` using a date‑based filename.  After a partition
+    is processed successfully it is marked as ``processed = true`` in DynamoDB.
+
+    Parameters
+    ----------
+    ticker : str
+        Company ticker symbol (case insensitive).
+    table_name : str, optional
+        DynamoDB table name.  Defaults to ``fin_guard_partitions``.
+    aws_region : str or None, optional
+        AWS region for DynamoDB.  If ``None``, the default boto3 region is used.
+    reprocess : bool, optional
+        If ``True``, ignore the ``processed`` flag and re-fetch all ESG partitions.
+
+    Returns
+    -------
+    list[pathlib.Path]
+        Paths to the saved ESG text files.
+    """
+    from pathlib import Path
+    import boto3
+    import io
+    import pandas as pd  # type: ignore
+    from datetime import datetime, timezone
+
+    # Helper to sanitise company names for filesystem
+    def _sanitize(name: str) -> str:
+        return re.sub(r"[\\/]+", "-", str(name)).replace(" ", "_")
+
+    dynamo = boto3.client("dynamodb", region_name=aws_region) if aws_region else boto3.client("dynamodb")
+    s3 = boto3.client("s3")
+    pk = f"TICKER#{ticker.upper()}"
+    pk = f"TICKER#{ticker.upper()}"
+    expr_attr_names = {"#sk": "SK"}
+    expr_attr_values: Dict[str, Dict[str, Any]] = {
+        ":pk": {"S": pk},
+        ":esg_prefix": {"S": "SRC#ESG#"},
+    }
+    key_condition = "PK = :pk AND begins_with(#sk, :esg_prefix)"
+    filter_expr = None
+    if not reprocess:
+        expr_attr_names["#p"] = "processed"
+        filter_expr = "(#p = :false) OR attribute_not_exists(#p)"
+        expr_attr_values[":false"] = {"BOOL": False}
+    query_kwargs: Dict[str, Any] = {
+        "TableName": table_name,
+        "KeyConditionExpression": key_condition,
+        "ExpressionAttributeNames": expr_attr_names,
+        "ExpressionAttributeValues": expr_attr_values,
+    }
+    if filter_expr:
+        query_kwargs["FilterExpression"] = filter_expr
+    items: List[Dict[str, Any]] = []
+    while True:
+        resp = dynamo.query(**query_kwargs)
+        items.extend(resp.get("Items", []))
+        if "LastEvaluatedKey" not in resp:
+            break
+        query_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+    results: List[Path] = []
+    # Process each partition
+    for it in items:
+        try:
+            bucket = it["bucket"]["S"]
+            key = it["key"]["S"]
+            pk_val = it["PK"]["S"]
+            sk_val = it["SK"]["S"]
+        except Exception:
+            continue
+        # Download manifest
+        try:
+            obj = s3.get_object(Bucket=bucket, Key=key)
+            body = obj["Body"].read()
+        except Exception:
+            continue
+        try:
+            df = pd.read_parquet(io.BytesIO(body))
+        except Exception:
+            continue
+        # Determine output directory and filename counter
+        safe_company = _sanitize(ticker)
+        out_dir = Path("texts") / safe_company / "ESG"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        per_date_counter: Dict[str, int] = {}
+        partition_ok = True
+        for _, row in df.iterrows():
+            # Attempt to extract URL and date
+            url = row.get("url")
+            date = row.get("filingdate") or row.get("date") or row.get("ts") or "unknown-date"
+            # Normalise date to string
+            date_str = str(date)[:10]
+            # Determine unique filename stem
+            per_date_counter.setdefault(date_str, 0)
+            per_date_counter[date_str] += 1
+            idx = per_date_counter[date_str]
+            if idx == 1:
+                stem = f"{safe_company}__{date_str}__ESG"
+            else:
+                stem = f"{safe_company}__{date_str}_{idx}__ESG"
+            out_file = out_dir / f"{stem}.txt"
+            # Skip if exists
+            if out_file.exists():
+                results.append(out_file)
+                continue
+            text: Optional[str] = None
+            # Try downloading report
+            if isinstance(url, str) and url and url != "\\N":
+                try:
+                    text = _download_text_from_url(url)
+                    if text:
+                        text = text.strip()
+                    else:
+                        text = None
+                except Exception:
+                    text = None
+            # Fallback to description/title/summary
+            if not text:
+                desc = row.get("description") or row.get("title") or row.get("summary")
+                if isinstance(desc, str) and desc and desc != "\\N":
+                    text = desc.strip()
+            if not text:
+                continue
+            try:
+                out_file.write_text(text, encoding="utf-8")
+                print(f"✅  Saved ESG report → {out_file}")
+                results.append(out_file)
+            except Exception:
+                partition_ok = False
+                break
+        # Mark partition as processed if no errors
+        if partition_ok:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            update_expr = "SET #p = :true, processed_at = :now"
+            cond_expr = "attribute_not_exists(#p) OR #p = :false"
+            try:
+                dynamo.update_item(
+                    TableName=table_name,
+                    Key={"PK": {"S": pk_val}, "SK": {"S": sk_val}},
+                    UpdateExpression=update_expr,
+                    ConditionExpression=cond_expr,
+                    ExpressionAttributeNames={"#p": "processed"},
+                    ExpressionAttributeValues={
+                        ":true": {"BOOL": True},
+                        ":false": {"BOOL": False},
+                        ":now": {"S": now_iso},
+                    },
+                )
+            except Exception:
+                pass
+    return results
+
+
+def fetch_social_for_ticker_from_partitions(
+    ticker: str,
+    *,
+    table_name: str = "fin_guard_partitions",
+    aws_region: Optional[str] = None,
+    reprocess: bool = False,
+    overwrite: bool = False,
+) -> List[Path]:
+    """
+    Fetch social media posts for a ticker using fin_guard_partitions as the source of
+    manifests.
+
+    This function queries DynamoDB for unprocessed SOCIAL partitions for the given
+    ticker, downloads each manifest from S3, extracts post content and
+    aggregates all posts into a single JSON file ``social/<TICKER>.json``.
+    After successful processing, the DynamoDB item is marked as processed.
+
+    Parameters
+    ----------
+    ticker : str
+        Company ticker symbol (case insensitive).
+    table_name : str, optional
+        DynamoDB table name.  Defaults to ``fin_guard_partitions``.
+    aws_region : str or None, optional
+        AWS region for DynamoDB.  If ``None``, the default boto3 region is used.
+    reprocess : bool, optional
+        If ``True``, ignore the ``processed`` flag and re-fetch all social partitions.
+    overwrite : bool, optional
+        Whether to overwrite an existing social JSON file if it already exists.
+
+    Returns
+    -------
+    list[pathlib.Path]
+        A list containing the path to the aggregated social JSON file.  If no
+        posts were collected, returns an empty list.
+    """
+    from pathlib import Path
+    import boto3
+    import io
+    import pandas as pd  # type: ignore
+    from datetime import datetime, timezone
+
+    dynamo = boto3.client("dynamodb", region_name=aws_region) if aws_region else boto3.client("dynamodb")
+    s3 = boto3.client("s3")
+    pk = f"TICKER#{ticker.upper()}"
+    pk = f"TICKER#{ticker.upper()}"
+    expr_attr_names = {"#sk": "SK"}
+    expr_attr_values: Dict[str, Dict[str, Any]] = {
+        ":pk": {"S": pk},
+        ":social_prefix": {"S": "SRC#SOCIAL#"},
+    }
+    key_condition = "PK = :pk AND begins_with(#sk, :social_prefix)"
+    filter_expr = None
+    if not reprocess:
+        expr_attr_names["#p"] = "processed"
+        filter_expr = "(#p = :false) OR attribute_not_exists(#p)"
+        expr_attr_values[":false"] = {"BOOL": False}
+    query_kwargs: Dict[str, Any] = {
+        "TableName": table_name,
+        "KeyConditionExpression": key_condition,
+        "ExpressionAttributeNames": expr_attr_names,
+        "ExpressionAttributeValues": expr_attr_values,
+    }
+    if filter_expr:
+        query_kwargs["FilterExpression"] = filter_expr
+    items: List[Dict[str, Any]] = []
+    while True:
+        resp = dynamo.query(**query_kwargs)
+        items.extend(resp.get("Items", []))
+        if "LastEvaluatedKey" not in resp:
+            break
+        query_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+    posts: List[Dict[str, Any]] = []
+    # Process partitions
+    for it in items:
+        try:
+            bucket = it["bucket"]["S"]
+            key = it["key"]["S"]
+            pk_val = it["PK"]["S"]
+            sk_val = it["SK"]["S"]
+        except Exception:
+            continue
+        try:
+            obj = s3.get_object(Bucket=bucket, Key=key)
+            body = obj["Body"].read()
+        except Exception:
+            continue
+        try:
+            df = pd.read_parquet(io.BytesIO(body))
+        except Exception:
+            continue
+        partition_ok = True
+        # Iterate rows to build posts
+        for _, row in df.iterrows():
+            # Determine text: prefer content/text/description/title, fallback to URL
+            raw_content = (
+                row.get("content")
+                or row.get("text")
+                or row.get("description")
+                or row.get("title")
+                or None
+            )
+            url = row.get("url")
+            text: Optional[str] = None
+            if isinstance(raw_content, str) and raw_content and raw_content != "\\N":
+                text = raw_content
+            elif isinstance(url, str) and url and url != "\\N":
+                try:
+                    dl = _download_text_from_url(url)
+                    if dl:
+                        text = dl.strip()
+                except Exception:
+                    text = None
+            if not text:
+                continue
+            # Extract timestamp
+            timestamp_val = None
+            for col in [
+                "created_at",
+                "published_at",
+                "timestamp",
+                "datetime",
+                "ts",
+                "ingest_ts",
+                "time",
+            ]:
+                val = row.get(col)
+                v = val.strip() if isinstance(val, str) else val
+                if v is None or v == "\\N" or v == "":
+                    continue
+                timestamp_val = v
+                break
+            ts_str = ""
+            try:
+                import pandas as _pd  # type: ignore
+                if timestamp_val is not None and not (_pd.isna(timestamp_val)):
+                    ts_str = str(timestamp_val)
+            except Exception:
+                if timestamp_val is not None:
+                    ts_str = str(timestamp_val)
+            # Likes
+            likes = row.get("likes")
+            try:
+                likes = int(likes) if likes not in (None, "\\N") else None
+            except Exception:
+                likes = None
+            # Reshares
+            reshares = row.get("reshares")
+            try:
+                reshares = int(reshares) if reshares not in (None, "\\N") else None
+            except Exception:
+                reshares = None
+            # Sentiment label
+            sentiment_label = row.get("sentiment")
+            if isinstance(sentiment_label, str) and sentiment_label != "\\N":
+                sentiment_label = sentiment_label.strip()
+            else:
+                sentiment_label = None
+            # Symbols
+            symbols = row.get("symbols")
+            parsed_symbols: Optional[List[str]] = None
+            if isinstance(symbols, list):
+                parsed_symbols = [str(s).upper() for s in symbols if s not in (None, "\\N")]
+            elif isinstance(symbols, str) and symbols and symbols != "\\N":
+                s = symbols.strip()
+                s = s.strip("[]")
+                parts = [p.strip().upper() for p in s.split(",") if p.strip()]
+                parsed_symbols = [p for p in parts if p]
+            # Author
+            author = None
+            for col in ["user_username", "author_username", "username"]:
+                val = row.get(col)
+                if isinstance(val, str) and val and val != "\\N":
+                    author = val
+                    break
+            if author is None:
+                yt = row.get("channel_title")
+                if isinstance(yt, str) and yt and yt != "\\N":
+                    author = yt
+            post: Dict[str, Any] = {
+                "timestamp": ts_str,
+                "content": text,
+            }
+            if likes is not None:
+                post["likes"] = likes
+            if reshares is not None:
+                post["reshares"] = reshares
+            if sentiment_label is not None:
+                post["sentiment_label"] = sentiment_label
+            if parsed_symbols:
+                post["symbols"] = parsed_symbols
+            if author is not None:
+                post["author"] = author
+            posts.append(post)
+        # Mark partition processed if no errors
+        if partition_ok := True:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            update_expr = "SET #p = :true, processed_at = :now"
+            cond_expr = "attribute_not_exists(#p) OR #p = :false"
+            try:
+                dynamo.update_item(
+                    TableName=table_name,
+                    Key={"PK": {"S": pk_val}, "SK": {"S": sk_val}},
+                    UpdateExpression=update_expr,
+                    ConditionExpression=cond_expr,
+                    ExpressionAttributeNames={"#p": "processed"},
+                    ExpressionAttributeValues={
+                        ":true": {"BOOL": True},
+                        ":false": {"BOOL": False},
+                        ":now": {"S": now_iso},
+                    },
+                )
+            except Exception:
+                pass
+    # After processing all partitions, write aggregated posts
+    if not posts:
+        return []
+    out_dir = Path("social")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_file = out_dir / f"{ticker.upper()}.json"
+    
+    import json as _json
+    existing_posts = []
+    if out_file.exists() and not overwrite:
+        try:
+            with open(out_file, "r", encoding="utf-8") as fh:
+                existing_posts = _json.load(fh)
+                if not isinstance(existing_posts, list):
+                    existing_posts = []
+        except Exception:
+            existing_posts = []
+    
+    # Append new posts to existing ones
+    all_posts = existing_posts + posts
+    
+    try:
+        with open(out_file, "w", encoding="utf-8") as fh:
+            _json.dump(all_posts, fh, ensure_ascii=False, indent=2)
+        print(f"✅  Saved social posts → {out_file} (Appended {len(posts)} new posts)")
+        return [out_file]
+    except Exception:
+        return []
+
+
 def _download_text_from_url(url: str) -> str:
     """Download and extract visible text from a URL.
 
@@ -503,6 +1059,12 @@ def _download_text_from_url(url: str) -> str:
         ),
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     }
+    import io
+    try:
+        import pypdf
+    except ImportError:
+        pypdf = None
+
     try:
         resp = requests.get(url, headers=headers, timeout=30)
         resp.raise_for_status()
@@ -519,6 +1081,17 @@ def _download_text_from_url(url: str) -> str:
             for script in soup(["script", "style"]):
                 script.decompose()
             text = soup.get_text(separator="\n")
+        elif "pdf" in content_type or resp.content.startswith(b"%PDF-"):
+            if pypdf is None:
+                print(f"⚠️  pypdf not installed, cannot extract text from PDF at {url}")
+                return ""
+            try:
+                with io.BytesIO(resp.content) as f:
+                    reader = pypdf.PdfReader(f)
+                    text = "\n".join(page.extract_text() for page in reader.pages)
+            except Exception as e:
+                print(f"⚠️  Failed to parse PDF from {url}: {e}")
+                text = ""
         else:
             # For non‑HTML (including PDFs), just decode the response.
             # Some sites deliver PDF files with a generic text/plain
