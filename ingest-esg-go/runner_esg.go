@@ -1,19 +1,19 @@
 package main
 
 import (
-    "context"
-    "encoding/json"
-    "errors"
-    "fmt"
-    "log"
-    "net/url"
-    "os"
-    "strings"
-    "time"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"net/url"
+	"os"
+	"strings"
+	"time"
 
-    "github.com/aws/aws-sdk-go/aws"
-    "github.com/aws/aws-sdk-go/aws/session"
-    "github.com/aws/aws-sdk-go/service/kinesis"
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/kinesis"
 )
 
 // RunESGJob executes an ESG ingest job for a single ticker. It performs
@@ -24,60 +24,60 @@ import (
 // entire job. The args struct holds any user‑supplied overrides such
 // as S3 bucket, Kinesis stream or blacklist path.
 func RunESGJob(ctx context.Context, jobID, ingestDate, ticker string, args *esgArgs) error {
-    // Load configuration from config.json.  The Config struct includes
-    // Google API keys (unused for domain discovery), a Serper API key
-    // and Kinesis stream settings.
-    cfg, err := LoadConfig()
-    if err != nil {
-        // configuration failed to load; cannot emit metadata because emitMeta not defined yet
-        return fmt.Errorf("load config: %w", err)
-    }
-    // Determine the stream for metadata events. Prefer command-line override, then config, else default.
-    metaStreamName := args.Stream
-    if metaStreamName == "" {
-        metaStreamName = cfg.KinesisStream
-        if metaStreamName == "" {
-            metaStreamName = "fin-guard-stream"
-        }
-    }
-    // Define helper to emit control‑plane metadata events. These are routed to Kinesis with stage=METADATA.
-    emitMeta := func(eventType string, extra map[string]any) {
-        rec := map[string]any{
-            "stage":  "METADATA",
-            "type":   eventType,
-            "source": "ESG",
-            "ticker": strings.ToUpper(ticker),
-            "job_id": jobID,
-            "ts":     time.Now().UTC().Format(time.RFC3339),
-        }
-        if extra != nil {
-            for k, v := range extra {
-                rec[k] = v
-            }
-        }
-        data, err := json.Marshal(rec)
-        if err != nil {
-            log.Printf("WARN: failed to marshal metadata event %s: %v", eventType, err)
-            return
-        }
-        // Determine AWS region for Kinesis. Use environment variable if set.
-        region := os.Getenv("AWS_REGION")
-        if region == "" {
-            region = "us-east-1"
-        }
-        sess := session.Must(session.NewSession(&aws.Config{Region: aws.String(region)}))
-        svc := kinesis.New(sess)
-        _, err = svc.PutRecord(&kinesis.PutRecordInput{
-            StreamName:   aws.String(metaStreamName),
-            PartitionKey: aws.String(strings.ToUpper(ticker)),
-            Data:         data,
-        })
-        if err != nil {
-            log.Printf("WARN: failed to emit %s event for %s: %v", eventType, ticker, err)
-        }
-    }
-    // Emit job_started event signalling start of ESG ingest job.
-    emitMeta("job_started", nil)
+	// Load configuration from config.json.  The Config struct includes
+	// Google API keys (unused for domain discovery), a Serper API key
+	// and Kinesis stream settings.
+	cfg, err := LoadConfig()
+	if err != nil {
+		// configuration failed to load; cannot emit metadata because emitMeta not defined yet
+		return fmt.Errorf("load config: %w", err)
+	}
+	// Determine the stream for metadata events. Prefer command-line override, then config, else default.
+	metaStreamName := args.Stream
+	if metaStreamName == "" {
+		metaStreamName = cfg.KinesisStream
+		if metaStreamName == "" {
+			metaStreamName = "fin-guard-stream"
+		}
+	}
+	// Define helper to emit control‑plane metadata events. These are routed to Kinesis with stage=METADATA.
+	emitMeta := func(eventType string, extra map[string]any) {
+		rec := map[string]any{
+			"stage":  "METADATA",
+			"type":   eventType,
+			"source": "ESG",
+			"ticker": strings.ToUpper(ticker),
+			"job_id": jobID,
+			"ts":     time.Now().UTC().Format(time.RFC3339),
+		}
+		if extra != nil {
+			for k, v := range extra {
+				rec[k] = v
+			}
+		}
+		data, err := json.Marshal(rec)
+		if err != nil {
+			log.Printf("WARN: failed to marshal metadata event %s: %v", eventType, err)
+			return
+		}
+		// Determine AWS region for Kinesis. Use environment variable if set.
+		region := os.Getenv("AWS_REGION")
+		if region == "" {
+			region = "us-east-1"
+		}
+		sess := session.Must(session.NewSession(&aws.Config{Region: aws.String(region)}))
+		svc := kinesis.New(sess)
+		_, err = svc.PutRecord(&kinesis.PutRecordInput{
+			StreamName:   aws.String(metaStreamName),
+			PartitionKey: aws.String(strings.ToUpper(ticker)),
+			Data:         data,
+		})
+		if err != nil {
+			log.Printf("WARN: failed to emit %s event for %s: %v", eventType, ticker, err)
+		}
+	}
+	// Emit job_started event signalling start of ESG ingest job.
+	emitMeta("job_started", nil)
 	// Determine region override if provided. s3.go and kinesis.go set
 	// default regions internally so region is mainly relevant for
 	// DynamoDB; we honour AWS_REGION if args.Region is non‑empty.
@@ -175,19 +175,19 @@ func RunESGJob(ctx context.Context, jobID, ingestDate, ticker string, args *esgA
 		// args.MinNew. SearchESGLinks will attempt to gather at least this
 		// many unique results by expanding its search across years when
 		// possible.
-        results, err := SearchESGLinks(company.Name, cfg, args.MinNew)
-        if err != nil {
-            log.Printf("search %s: %v", ticker, err)
-            emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("search: %v", err)})
-            return err
-        }
+		results, err := SearchESGLinks(ticker, company.Name, cfg, args.MinNew)
+		if err != nil {
+			log.Printf("search %s: %v", ticker, err)
+			emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("search: %v", err)})
+			return err
+		}
 		// Initialise DynamoDB seen store
-        store, err := NewESGDDBStore(ctx)
-        if err != nil {
-            log.Printf("dynamo init: %v", err)
-            emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("ddb init: %v", err)})
-            return err
-        }
+		store, err := NewESGDDBStore(ctx)
+		if err != nil {
+			log.Printf("dynamo init: %v", err)
+			emitMeta("job_failed", map[string]any{"error": fmt.Sprintf("ddb init: %v", err)})
+			return err
+		}
 		// Optionally load seen URLs from S3 as a fallback. This is
 		// controlled by ESG_USE_S3_SEEN_FALLBACK. If true and the call
 		// fails the error is ignored and only DDB deduplication will be
@@ -202,9 +202,9 @@ func RunESGJob(ctx context.Context, jobID, ingestDate, ticker string, args *esgA
 		newCount := 0
 		for _, item := range results {
 			select {
-            case <-ctx.Done():
-                emitMeta("job_failed", map[string]any{"error": "terminated"})
-                return errors.New("terminated")
+			case <-ctx.Done():
+				emitMeta("job_failed", map[string]any{"error": "terminated"})
+				return errors.New("terminated")
 			default:
 			}
 			// Deduplicate via DynamoDB
@@ -275,9 +275,9 @@ func RunESGJob(ctx context.Context, jobID, ingestDate, ticker string, args *esgA
 			}
 			newCount++
 		}
-        log.Printf("✅ %s (new=%d / serp=%d)", ticker, newCount, len(results))
-        // Emit job_completed event with count of new ESG records
-        emitMeta("job_completed", map[string]any{"new_records": newCount})
+		log.Printf("✅ %s (new=%d / serp=%d)", ticker, newCount, len(results))
+		// Emit job_completed event with count of new ESG records
+		emitMeta("job_completed", map[string]any{"new_records": newCount})
 	}
 	return nil
 }

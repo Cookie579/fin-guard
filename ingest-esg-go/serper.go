@@ -65,11 +65,20 @@ func hostMatchesDomain(host, domain string) bool {
 // When minResults > 0, it will stop scheduling NEW query blocks as soon
 // as >= minResults unique links have been aggregated (it still finishes
 // the block that crossed the threshold).
-func SearchESGLinks(company string, cfg *Config, minResults int) ([]SearchItem, error) {
+// Uses DynamoDB state tracking to remember which pages have been searched for each query,
+// enabling true pagination across multiple runs.
+func SearchESGLinks(ticker, company string, cfg *Config, minResults int) ([]SearchItem, error) {
 	ctx := context.Background()
 	client := &http.Client{Timeout: 20 * time.Second}
 	seen := make(map[string]bool)
 	var combined []SearchItem
+
+	// Initialize search state store for pagination
+	stateStore, err := NewSearchStateStore(ctx)
+	if err != nil {
+		log.Printf("⚠️ search state init failed: %v (will search from page 1)", err)
+		stateStore = nil // Continue without state tracking
+	}
 
 	// Helper: have we hit the requested minimum?
 	enough := func() bool {
@@ -236,21 +245,37 @@ FILETYPES:
 		}
 	}
 
-	// -------- Year sweep (present → 1980) --------
+	// -------- Year sweep (present → 2010) --------
+	// Start from current year and go back to 2010. This prioritizes recent ESG reports.
+	// Stop early if we hit 3 consecutive years with no results (maxEmptyStreak).
 	emptyYearStreak := 0
 	maxEmptyStreak := 3
 	currentYear := time.Now().Year()
 
 YEARS:
-	for y := currentYear; y >= 1980 && emptyYearStreak < maxEmptyStreak; y-- {
+	for y := currentYear; y >= 2010 && emptyYearStreak < maxEmptyStreak; y-- {
 		foundAny := false
 		for _, pillar := range pillars {
 			qPlain := fmt.Sprintf("%s %s %d", company, pillar, y)
-			qFull := map[string]any{"q": qPlain, "num": 100}
+
+			// Check what page we should query next for this search
+			nextPage := 1
+			if stateStore != nil {
+				if lastPage, err := stateStore.GetLastPage(ctx, ticker, "year", qPlain); err == nil && lastPage > 0 {
+					nextPage = lastPage + 1
+					log.Printf("📄 Continuing from page %d for query: %s", nextPage, qPlain)
+				}
+			}
+
+			qFull := map[string]any{
+				"q":    qPlain,
+				"num":  100,
+				"page": nextPage, // Add pagination parameter
+			}
 
 			respParsed, _, _, err := post(qFull)
 			if err != nil && strings.Contains(err.Error(), "Query not allowed") {
-				respParsed, _, _, err = post(map[string]any{"q": qPlain})
+				respParsed, _, _, err = post(map[string]any{"q": qPlain, "page": nextPage})
 			}
 			if err != nil {
 				return nil, err
@@ -273,6 +298,14 @@ YEARS:
 					Link:  link,
 				})
 			}
+
+			// Update state: mark this page as searched
+			if stateStore != nil && len(respParsed.Organic) > 0 {
+				if err := stateStore.SetLastPage(ctx, ticker, "year", qPlain, nextPage); err != nil {
+					log.Printf("⚠️ failed to update search state: %v", err)
+				}
+			}
+
 			time.Sleep(200 * time.Millisecond)
 		}
 		if foundAny {
@@ -286,19 +319,35 @@ YEARS:
 		}
 	}
 
-	// -------- Extended year sweep (1979 → 1900) if still below target --------
+	// -------- Extended year sweep (2009 → 2000) if still below target --------
+	// Only search back to 2000 for older ESG reports. Most ESG reporting standards
+	// were established in the 2000s, so earlier data is rare and often irrelevant.
 	if minResults > 0 && len(combined) < minResults {
-		earliestYear := 1900
+		earliestYear := 2000
 		emptyYearStreak = 0
-		for y := 1979; y >= earliestYear && emptyYearStreak < maxEmptyStreak; y-- {
+		for y := 2009; y >= earliestYear && emptyYearStreak < maxEmptyStreak; y-- {
 			foundAny := false
 			for _, pillar := range pillars {
 				qPlain := fmt.Sprintf("%s %s %d", company, pillar, y)
-				qFull := map[string]any{"q": qPlain, "num": 100}
+
+				// Check pagination state for this query
+				nextPage := 1
+				if stateStore != nil {
+					if lastPage, err := stateStore.GetLastPage(ctx, ticker, "year", qPlain); err == nil && lastPage > 0 {
+						nextPage = lastPage + 1
+						log.Printf("📄 Continuing from page %d for query: %s", nextPage, qPlain)
+					}
+				}
+
+				qFull := map[string]any{
+					"q":    qPlain,
+					"num":  100,
+					"page": nextPage,
+				}
 
 				respParsed, _, _, err := post(qFull)
 				if err != nil && strings.Contains(err.Error(), "Query not allowed") {
-					respParsed, _, _, err = post(map[string]any{"q": qPlain})
+					respParsed, _, _, err = post(map[string]any{"q": qPlain, "page": nextPage})
 				}
 				if err != nil {
 					return nil, err
@@ -321,6 +370,14 @@ YEARS:
 						Link:  link,
 					})
 				}
+
+				// Update state
+				if stateStore != nil && len(respParsed.Organic) > 0 {
+					if err := stateStore.SetLastPage(ctx, ticker, "year", qPlain, nextPage); err != nil {
+						log.Printf("⚠️ failed to update search state: %v", err)
+					}
+				}
+
 				time.Sleep(200 * time.Millisecond)
 			}
 			if foundAny {
