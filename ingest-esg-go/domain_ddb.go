@@ -67,9 +67,11 @@ func (s *DomainDDBStore) GetDomain(ctx context.Context, ticker string) (string, 
 		"ticker": &dynamodbtypes.AttributeValueMemberS{Value: tk},
 	}
 	out, err := s.client.GetItem(ctx, &dynamodb.GetItemInput{
-		TableName:            aws.String(s.table),
-		Key:                  key,
-		ProjectionExpression: aws.String("domain"),
+		TableName: aws.String(s.table),
+		Key:       key,
+		// Use expression attribute names to avoid reserved keyword "domain"
+		ProjectionExpression:     aws.String("#d"),
+		ExpressionAttributeNames: map[string]string{"#d": "domain"},
 	})
 	if err != nil {
 		return "", err
