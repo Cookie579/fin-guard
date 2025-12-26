@@ -124,7 +124,6 @@ def _analyse_social(posts_file: str) -> None:
 def _run_pipeline(
     texts_dir: str,
     outputs_dir: str,
-    social_dir: Optional[str],
     filter_company: Optional[str],
     ticker: Optional[str],
     data_root: Optional[str] = None,
@@ -149,9 +148,7 @@ def _run_pipeline(
         Directory containing raw text files under ``<company>/<form>/``.
     outputs_dir : str
         Directory where intermediate JSON results should be saved.
-    social_dir : str or None
-        Directory containing social posts files.  If ``None``, social
-        sentiment features are skipped.
+        Social data is automatically saved to ``{outputs_dir}/{ticker}/SOCIAL/``.
     filter_company : str or None
         If supplied, only rows whose company name contains this string (case
         insensitive) will be printed.
@@ -234,18 +231,23 @@ def _run_pipeline(
         if fetch_only:
             return
     # Construct pipeline configuration and run analysis
+    # Social dir is automatically derived from outputs_dir/{ticker}/SOCIAL
+    social_dir = Path(outputs_dir) / ticker.upper() / "SOCIAL" if ticker else None
+    
     cfg = PipelineConfig(
         texts_dir=Path(texts_dir),
         outputs_dir=Path(outputs_dir),
-        social_dir=Path(social_dir) if social_dir else None,
+        social_dir=social_dir,
         ticker=ticker,
     )
     pipeline = FinGuardPipeline(cfg)
     rows = pipeline.process_all()
-    for row in rows:
-        if filter_company and filter_company.lower() not in row["company"].lower():
-            continue
-        print(json.dumps(row, indent=2))
+    # Removed verbose row printing - results are saved to processed/ directory
+    # for row in rows:
+    #     if filter_company and filter_company.lower() not in row["company"].lower():
+    #         continue
+    #     print(json.dumps(row, indent=2))
+    
     # After processing, if social metrics were computed and a social directory
     # is configured, generate charts for the ticker and enrich posts with
     # sentiment.  Social charts will be written to ``charts/<TICKER>/SOCIAL``
@@ -255,21 +257,34 @@ def _run_pipeline(
     # ``<outputs_dir>/<TICKER>/social/<TICKER>.json`` (creating the
     # directory if needed).  Failures to generate charts or enrich posts
     # are logged but do not interrupt pipeline execution.
-    if ticker and social_dir:
+    if ticker and social_dir and social_dir.exists():
         try:
-            posts_file = Path(social_dir) / f"{ticker.upper()}.json"
-            if posts_file.exists():
-                # Generate social charts under charts/<ticker>/SOCIAL
-                charts_root = Path("charts") / ticker.upper()
-                social_out = charts_root / "SOCIAL"
-                generate_social_charts(posts_file, social_out)
-                # Compute sentiment for each post and save to processed/<ticker>/social
+            social_path = Path(social_dir)
+            # Find all social files for this ticker (e.g. NVDA_stocktwits.json, NVDA_youtube.json)
+            # Also support legacy NVDA.json
+            candidates = list(social_path.glob(f"{ticker.upper()}_*.json"))
+            legacy = social_path / f"{ticker.upper()}.json"
+            if legacy.exists() and legacy not in candidates:
+                candidates.append(legacy)
+            
+            # Combine all social posts from different sources
+            all_posts = []
+            for posts_file in candidates:
+                try:
+                    import json as _json
+                    with open(posts_file, "r", encoding="utf-8") as fh:
+                        posts = _json.load(fh)
+                        if isinstance(posts, list):
+                            all_posts.extend(posts)
+                except Exception as exc:
+                    print(f"⚠️  Failed to load {posts_file}: {exc}")
+            
+            if all_posts:
+                # Enrich all posts with sentiment
                 if SocialAnalyzer is not None:
                     try:
-                        import json as _json
-                        posts = _json.load(open(posts_file, "r", encoding="utf-8"))
                         sa = SocialAnalyzer()  # type: ignore
-                        for p in posts:
+                        for p in all_posts:
                             content = p.get("content", "")
                             score = sa.score_text(content)
                             p["sentiment_score"] = score
@@ -281,16 +296,30 @@ def _run_pipeline(
                             else:
                                 label = "neutral"
                             p["sentiment_class"] = label
-                        # Save enriched posts
-                        tgt_dir = Path(outputs_dir) / ticker.upper() / "SOCIAL"
-                        tgt_dir.mkdir(parents=True, exist_ok=True)
-                        out_path = tgt_dir / f"{ticker.upper()}.json"
-                        with open(out_path, "w", encoding="utf-8") as fh:
-                            _json.dump(posts, fh, ensure_ascii=False, indent=2)
                     except Exception as exc:
-                        print(f"⚠️  Failed to enrich social posts: {exc}")
+                        print(f"⚠️  Failed to enrich posts with sentiment: {exc}")
+                
+                # Save unified enriched posts to processed/{ticker}/SOCIAL/{ticker}_unified.json
+                try:
+                    tgt_dir = Path(outputs_dir) / ticker.upper() / "SOCIAL"
+                    tgt_dir.mkdir(parents=True, exist_ok=True)
+                    unified_path = tgt_dir / f"{ticker.upper()}_unified.json"
+                    with open(unified_path, "w", encoding="utf-8") as fh:
+                        _json.dump(all_posts, fh, ensure_ascii=False, indent=2)
+                    print(f"💾 Saved {len(all_posts)} unified posts to {unified_path}")
+                except Exception as exc:
+                    print(f"⚠️  Failed to save unified posts: {exc}")
+                
+                # Generate unified social chart from combined data
+                try:
+                    charts_root = Path("charts") / ticker.upper() / "SOCIAL"
+                    generate_social_charts(unified_path, charts_root)
+                    print(f"📊 Generated unified social charts in {charts_root}")
+                except Exception as exc:
+                    print(f"⚠️  Failed to generate social charts: {exc}")
+            
         except Exception as exc:
-            print(f"⚠️  Failed to generate social charts: {exc}")
+            print(f"⚠️  Failed to process social data: {exc}")
     # Generate ESG and SEC charts using aggregated metrics
     if ticker:
         # Collect all esg_metrics and sec_metrics from rows for this ticker
@@ -394,7 +423,6 @@ def main(argv: Optional[list[str]] = None) -> None:
     pipeline_parser = subparsers.add_parser("pipeline", help="Run the full pipeline")
     pipeline_parser.add_argument("--texts-dir", default="texts", help="Directory with raw text files")
     pipeline_parser.add_argument("--outputs-dir", default="processed", help="Directory to store processed JSONs")
-    pipeline_parser.add_argument("--social-dir", default=None, help="Directory containing social posts files")
     pipeline_parser.add_argument(
         "--filter-company",
         default=None,
@@ -486,7 +514,6 @@ def main(argv: Optional[list[str]] = None) -> None:
         _run_pipeline(
             args.texts_dir,
             args.outputs_dir,
-            args.social_dir,
             args.filter_company,
             args.ticker,
             data_root=args.data_root,

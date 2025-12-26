@@ -451,6 +451,25 @@ def main(input_file=None, output_file=None):
     output_path.write_text(json.dumps(out, indent=2), encoding="utf-8")
     print("💾 Saved →", output_path)
 
+    # Publish processed record to Kinesis for downstream processing
+    try:
+        from kinesis_client import publish_processed_filing, extract_metadata_from_path
+        
+        metadata = extract_metadata_from_path(str(input_path))
+        filing_record = {
+            "company": SAFE_COMPANY.replace("_", " "),
+            "ticker": metadata["ticker"],
+            "source": "ESG",
+            "form": "ESG",
+            "filingDate": FILING_DATE,
+            "accession": "",  # ESG reports don't have accession numbers
+            "url": "",
+            "stage": "PROCESSED"
+        }
+        publish_processed_filing(filing_record)
+    except Exception as e:
+        print(f"⚠️  Failed to publish to Kinesis: {e}")
+
 
 if __name__ == "__main__":
     import sys

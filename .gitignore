@@ -53,3 +53,5 @@ texts/
 processed/
 charts/
 social/
+reports/
+llm-explainer/chroma_db

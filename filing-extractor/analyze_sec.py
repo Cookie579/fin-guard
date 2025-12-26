@@ -475,6 +475,25 @@ def main(input_file=None, output_file=None):
     Path(OUTPUT_FILE).write_text(json.dumps(out, indent=2), encoding="utf-8")
     print("💾 Saved →", OUTPUT_FILE)
 
+    # Publish processed record to Kinesis for downstream processing
+    try:
+        from kinesis_client import publish_processed_filing, extract_metadata_from_path
+        
+        metadata = extract_metadata_from_path(INPUT_FILE)
+        filing_record = {
+            "company": COMPANY_NAME or "",
+            "ticker": metadata["ticker"],
+            "source": "SEC",
+            "form": FORM_TYPE or metadata["form_type"],
+            "filingDate": FILING_DATE or metadata["filing_date"],
+            "accession": "",  # Not available in this context
+            "url": "",
+            "stage": "PROCESSED"
+        }
+        publish_processed_filing(filing_record)
+    except Exception as e:
+        print(f"⚠️  Failed to publish to Kinesis: {e}")
+
 
 if __name__ == "__main__":
     main()

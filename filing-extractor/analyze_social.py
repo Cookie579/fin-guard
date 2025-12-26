@@ -238,6 +238,46 @@ def main(input_file: str, output_file: Optional[str] = None) -> None:
     else:
         print(json.dumps(metrics, indent=2))
 
+    # Publish processed record to Kinesis for downstream processing
+    try:
+        from kinesis_client import publish_processed_filing, extract_metadata_from_path
+        
+        metadata = extract_metadata_from_path(input_file)
+        
+        # Extract source from filename: NVDA_stocktwits.json or NVDA_youtube.json
+        source = "SOCIAL"  # default fallback
+        file_stem = Path(input_file).stem  # "NVDA_stocktwits" or "NVDA_youtube"
+        if "_" in file_stem:
+            source_part = file_stem.split("_")[-1].upper()  # "STOCKTWITS" or "YOUTUBE"
+            # Only use if it's a valid source
+            if source_part in ["STOCKTWITS", "YOUTUBE"]:
+                source = source_part
+        
+        # For social posts, use the max timestamp as the filing date
+        filing_date = ""
+        if posts:
+            try:
+                import pandas as pd
+                timestamps = [p.get("timestamp", "") for p in posts if p.get("timestamp")]
+                if timestamps:
+                    filing_date = str(pd.to_datetime(max(timestamps), errors="coerce").date())
+            except Exception:
+                pass
+        
+        filing_record = {
+            "company": "",  # Not available for social posts
+            "ticker": metadata["ticker"],
+            "source": source,  # Changed from hardcoded "SOCIAL"
+            "form": source,    # Changed from hardcoded "STOCKTWITS"
+            "filingDate": filing_date,
+            "accession": "",
+            "url": "",
+            "stage": "PROCESSED"
+        }
+        publish_processed_filing(filing_record)
+    except Exception as e:
+        print(f"⚠️  Failed to publish to Kinesis: {e}")
+
 
 if __name__ == "__main__":
     # When invoked from the command line, parse up to two positional

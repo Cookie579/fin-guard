@@ -1,0 +1,15 @@
+openai
+chromadb
+sentence-transformers
+networkx
+scipy
+yfinance
+weasyprint
+plotly
+matplotlib
+pandas
+numpy
+jinja2
+markdown
+pypdf
+spacy

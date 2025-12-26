@@ -542,7 +542,9 @@ def fetch_sec_for_ticker_from_partitions(
         if "LastEvaluatedKey" not in resp:
             break
         query_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
-
+    
+    print(f"📦 Found {len(items)} SEC partitions for {ticker}")
+    
     saved_files: List[Path] = []
     # Process each partition
     for it in items:
@@ -681,6 +683,9 @@ def fetch_esg_for_ticker_from_partitions(
         if "LastEvaluatedKey" not in resp:
             break
         query_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+    
+    print(f"📦 Found {len(items)} ESG partitions for {ticker}")
+    
     results: List[Path] = []
     # Process each partition
     for it in items:
@@ -846,9 +851,16 @@ def fetch_social_for_ticker_from_partitions(
         if "LastEvaluatedKey" not in resp:
             break
         query_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+    
+    print(f"📦 Found {len(items)} social partitions for {ticker}")
+    
     posts: List[Dict[str, Any]] = []
+    partition_stats = {"total": 0, "skipped_no_s3": 0, "skipped_no_parquet": 0, "rows_processed": 0, "rows_no_text": 0}
+    source_row_counts = {}  # Track rows per source
+    
     # Process partitions
     for it in items:
+        partition_stats["total"] += 1
         try:
             bucket = it["bucket"]["S"]
             key = it["key"]["S"]
@@ -860,14 +872,35 @@ def fetch_social_for_ticker_from_partitions(
             obj = s3.get_object(Bucket=bucket, Key=key)
             body = obj["Body"].read()
         except Exception:
+            partition_stats["skipped_no_s3"] += 1
             continue
         try:
             df = pd.read_parquet(io.BytesIO(body))
         except Exception:
+            partition_stats["skipped_no_parquet"] += 1
             continue
         partition_ok = True
         # Iterate rows to build posts
         for _, row in df.iterrows():
+            partition_stats["rows_processed"] += 1
+            
+            # Extract source from the 'type' column in Parquet data
+            # type can be: "stocktwits_message" or "youtube_comment"
+            source = "stocktwits"  # default
+            type_val = row.get("type")
+            if isinstance(type_val, str) and type_val and type_val != "\\N":
+                type_normalized = type_val.strip().lower()
+                source_row_counts[type_normalized] = source_row_counts.get(type_normalized, 0) + 1
+                
+                # Map type to source
+                if "youtube" in type_normalized:
+                    source = "youtube"
+                elif "stocktwits" in type_normalized:
+                    source = "stocktwits"
+                else:
+                    # Unknown type, try to infer from the value
+                    source = type_normalized.replace("_message", "").replace("_comment", "")
+            
             # Determine text: prefer content/text/description/title, fallback to URL
             raw_content = (
                 row.get("content")
@@ -888,6 +921,7 @@ def fetch_social_for_ticker_from_partitions(
                 except Exception:
                     text = None
             if not text:
+                partition_stats["rows_no_text"] += 1
                 continue
             # Extract timestamp
             timestamp_val = None
@@ -953,9 +987,14 @@ def fetch_social_for_ticker_from_partitions(
                 yt = row.get("channel_title")
                 if isinstance(yt, str) and yt and yt != "\\N":
                     author = yt
+            
+            # Source was already extracted above from the 'type' column
+            # No need to re-extract here
+            
             post: Dict[str, Any] = {
                 "timestamp": ts_str,
                 "content": text,
+                "_source": source,  # Add source metadata
             }
             if likes is not None:
                 post["likes"] = likes
@@ -988,34 +1027,71 @@ def fetch_social_for_ticker_from_partitions(
                 )
             except Exception:
                 pass
-    # After processing all partitions, write aggregated posts
+    
+    # Print processing statistics
+    print(f"\n📊 Processing Statistics for {ticker}:")
+    print(f"   Total partitions: {partition_stats['total']}")
+    print(f"   Skipped (S3 error): {partition_stats['skipped_no_s3']}")
+    print(f"   Skipped (Parquet error): {partition_stats['skipped_no_parquet']}")
+    print(f"   Rows processed: {partition_stats['rows_processed']}")
+    print(f"   Rows skipped (no text): {partition_stats['rows_no_text']}")
+    print(f"\n📋 Rows by type:")
+    for src, count in source_row_counts.items():
+        print(f"   {src}: {count} rows")
+    
+    # After processing all partitions, write aggregated posts grouped by source
     if not posts:
+        print("⚠️  No posts collected from any partition")
         return []
-    out_dir = Path("social")
+    
+    # Group posts by source (extracted from partition SK)
+    # SK format is typically: SRC#SOCIAL#{source}#{date} where source = youtube or stocktwits
+    from collections import defaultdict
+    posts_by_source = defaultdict(list)
+    
+    for post in posts:
+        # Extract source from post metadata if available, otherwise default to stocktwits
+        source = post.get("_source", "stocktwits").lower()
+        posts_by_source[source].append(post)
+    
+    # Debug: Print source distribution
+    print(f"📊 Post distribution by source:")
+    for src, src_posts in posts_by_source.items():
+        print(f"   {src}: {len(src_posts)} posts")
+    
+    # Save to processed/{ticker}/SOCIAL/ instead of social/
+    out_dir = Path("processed") / ticker.upper() / "SOCIAL"
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_file = out_dir / f"{ticker.upper()}.json"
+    saved_files = []
     
     import json as _json
-    existing_posts = []
-    if out_file.exists() and not overwrite:
+    
+    # Save each source to its own file
+    for source, source_posts in posts_by_source.items():
+        out_file = out_dir / f"{ticker.upper()}_{source}.json"
+        
+        existing_posts = []
+        if out_file.exists() and not overwrite:
+            try:
+                with open(out_file, "r", encoding="utf-8") as fh:
+                    existing_posts = _json.load(fh)
+                    if not isinstance(existing_posts, list):
+                        existing_posts = []
+            except Exception:
+                existing_posts = []
+        
+        # Append new posts to existing ones
+        all_posts = existing_posts + source_posts
+        
         try:
-            with open(out_file, "r", encoding="utf-8") as fh:
-                existing_posts = _json.load(fh)
-                if not isinstance(existing_posts, list):
-                    existing_posts = []
+            with open(out_file, "w", encoding="utf-8") as fh:
+                _json.dump(all_posts, fh, ensure_ascii=False, indent=2)
+            print(f"✅  Saved {source} posts → {out_file} (Appended {len(source_posts)} new posts)")
+            saved_files.append(out_file)
         except Exception:
-            existing_posts = []
+            pass
     
-    # Append new posts to existing ones
-    all_posts = existing_posts + posts
-    
-    try:
-        with open(out_file, "w", encoding="utf-8") as fh:
-            _json.dump(all_posts, fh, ensure_ascii=False, indent=2)
-        print(f"✅  Saved social posts → {out_file} (Appended {len(posts)} new posts)")
-        return [out_file]
-    except Exception:
-        return []
+    return saved_files if saved_files else []
 
 
 def _download_text_from_url(url: str) -> str:
