@@ -10,6 +10,7 @@ Features modern typography, smaller fonts, and optimized layout.
 from pathlib import Path
 import markdown
 import tempfile
+import re
 
 try:
     from playwright.sync_api import sync_playwright
@@ -42,13 +43,21 @@ class PDFGenerator:
                 file_url = f"file:///{file_url}"
             
             img_tag = f'<img src="{file_url}" class="chart" alt="{name}">'
-            # Simple replacement placeholder logic
-            if f"{{{{ {name} }}}}" in html_body:
-                html_body = html_body.replace(f"{{{{ {name} }}}}", img_tag)
-            else:
+            # Try multiple placeholder formats (curly braces and square brackets)
+            replaced = False
+            for placeholder in [f"[[ {name} ]]", f"[[{name}]]", "{{ " + name + " }}", "{" + name + "}"]:
+                if placeholder in html_body:
+                    html_body = html_body.replace(placeholder, img_tag)
+                    replaced = True
+                    break
+            if not replaced:
                 # Append if not found (for new charts)
                 section_title = name.replace('_', ' ').title()
                 html_body += f"\n<div class='chart-section'><h3>{section_title}</h3>{img_tag}</div>"
+        
+        # Clean up any remaining placeholders that weren't replaced (no chart generated)
+        html_body = re.sub(r'\[\[\s*\w+\s*\]\]', '', html_body)
+        html_body = re.sub(r'\{\{\s*\w+\s*\}\}', '', html_body)
 
         # Professional HTML Template with modern styling
         full_html = f"""
@@ -130,18 +139,20 @@ class PDFGenerator:
                     color: #1a365d;
                 }}
                 
-                /* Charts */
+                /* Charts - full width, centered */
                 .chart, img {{
-                    max-width: 100%;
+                    max-width: 95%;
                     height: auto;
-                    margin: 15px 0;
-                    border-radius: 8px;
-                    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+                    margin: 15px auto;
+                    border-radius: 6px;
+                    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08);
+                    display: block;
                 }}
                 
                 .chart-section {{
-                    margin: 20px 0;
+                    margin: 15px 0;
                     page-break-inside: avoid;
+                    text-align: center;
                 }}
                 
                 /* Tables */

@@ -4,7 +4,7 @@
 *.tfstate.backup
 terraform.tfstate.d/
 crash.log
-*.tfvars            # keep variables private
+*.tfvars
 override.tf
 override.tf.json
 # --- Helm chart values that contain secrets ---

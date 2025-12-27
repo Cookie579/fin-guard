@@ -77,7 +77,7 @@ class ChartGenerator:
         Generate Price vs Sentiment correlation chart with real data.
         Aligns chart to the date range where sentiment data exists.
         """
-        fig, ax1 = plt.subplots(figsize=(12, 5), dpi=150)
+        fig, ax1 = plt.subplots(figsize=(14, 6), dpi=120)
         
         # First, determine date range from sentiment data if available
         sentiment_dates = []
@@ -132,24 +132,24 @@ class ChartGenerator:
                 if sentiment_data:
                     sentiment_series = self._calculate_daily_sentiment(sentiment_data, dates)
                 else:
-                    # Generate correlated mock sentiment
+                    # Generate correlated mock sentiment (-1 to 1 scale)
                     price_returns = np.diff(prices) / prices[:-1]
                     price_returns = np.insert(price_returns, 0, 0)
                     noise = np.random.normal(0, 0.15, len(dates))
-                    sentiment_series = 0.5 + (price_returns * 2) + noise
-                    sentiment_series = np.clip(sentiment_series, 0.1, 0.9)
+                    sentiment_series = (price_returns * 4) + noise  # Center around 0
+                    sentiment_series = np.clip(sentiment_series, -0.8, 0.8)
             else:
-                # Fallback to mock data
+                # Fallback to mock data (-1 to 1 scale)
                 dates = pd.date_range(end=datetime.now(), periods=90, freq='D')
                 prices = np.linspace(100, 150, 90) + np.random.normal(0, 5, 90)
-                sentiment_series = np.linspace(0.4, 0.7, 90) + np.random.normal(0, 0.08, 90)
-                sentiment_series = np.clip(sentiment_series, 0.1, 0.9)
+                sentiment_series = np.linspace(-0.2, 0.3, 90) + np.random.normal(0, 0.15, 90)
+                sentiment_series = np.clip(sentiment_series, -0.8, 0.8)
         else:
-            # Fallback to mock data
+            # Fallback to mock data (-1 to 1 scale)
             dates = pd.date_range(end=datetime.now(), periods=90, freq='D')
             prices = np.linspace(100, 150, 90) + np.random.normal(0, 5, 90)
-            sentiment_series = np.linspace(0.4, 0.7, 90) + np.random.normal(0, 0.08, 90)
-            sentiment_series = np.clip(sentiment_series, 0.1, 0.9)
+            sentiment_series = np.linspace(-0.2, 0.3, 90) + np.random.normal(0, 0.15, 90)
+            sentiment_series = np.clip(sentiment_series, -0.8, 0.8)
 
         # Price line (primary axis)
         color = COLORS['primary']
@@ -172,10 +172,17 @@ class ChartGenerator:
         # Plot daily sentiment as thick solid line
         line2 = ax2.plot(dates, sentiment_series, color=color, linewidth=2.5, 
                          alpha=0.9, label='Social Sentiment')
-        # Add light fill under sentiment
-        ax2.fill_between(dates, 0.5, sentiment_series, alpha=0.2, color=color)
+        # Add light fill: green above 0, red below 0
+        ax2.fill_between(dates, 0, sentiment_series, where=(sentiment_series >= 0), 
+                        alpha=0.2, color=COLORS['accent'], interpolate=True)
+        ax2.fill_between(dates, 0, sentiment_series, where=(sentiment_series < 0), 
+                        alpha=0.2, color=COLORS['danger'], interpolate=True)
         ax2.tick_params(axis='y', labelcolor=color)
-        ax2.set_ylim(0, 1)
+        # Auto-fit Y-axis to data range with padding, but always include 0
+        y_min = min(sentiment_series.min(), 0)
+        y_max = max(sentiment_series.max(), 0)
+        padding = (y_max - y_min) * 0.2
+        ax2.set_ylim(y_min - padding, y_max + padding)
         
         # Add trend lines
         z_price = np.polyfit(range(len(prices)), prices, 1)
@@ -271,7 +278,7 @@ class ChartGenerator:
             labels, counts = zip(*non_zero)
             colors = [SENTIMENT_COLORS.get(l.lower(), COLORS['secondary']) for l in labels]
         
-        fig, ax = plt.subplots(figsize=(8, 8), dpi=150)
+        fig, ax = plt.subplots(figsize=(4.5, 4.5), dpi=120)
         
         # Create donut chart
         wedges, texts, autotexts = ax.pie(
@@ -323,7 +330,7 @@ class ChartGenerator:
         x = np.arange(len(all_tickers))
         width = 0.25
         
-        fig, ax = plt.subplots(figsize=(12, 6), dpi=150)
+        fig, ax = plt.subplots(figsize=(11, 5), dpi=120)
         
         for i, (metric, label, color) in enumerate(zip(metrics, metric_labels, metric_colors)):
             values = [m.get(metric, 0) * 100 for m in all_metrics]
@@ -491,8 +498,153 @@ class ChartGenerator:
         
         plt.tight_layout()
         output_path = self.output_dir / "esg_focus.png"
-        plt.savefig(output_path, dpi=150, bbox_inches='tight',
+        plt.savefig(output_path, dpi=120, bbox_inches='tight',
                     facecolor='white', edgecolor='none')
+        plt.close()
+        return output_path
+
+    def generate_sentiment_momentum(self, ticker: str, sentiment_data: list) -> Path:
+        """Generate a weekly sentiment momentum chart showing trend direction."""
+        if not sentiment_data:
+            return None
+        
+        # Parse sentiment by date - keep raw -1 to 1 scale
+        sentiment_by_date = {}
+        for post in sentiment_data:
+            timestamp = (post.get('timestamp') or post.get('created_at') or 
+                        post.get('date') or post.get('time'))
+            if not timestamp:
+                continue
+            try:
+                date = pd.to_datetime(timestamp, errors='coerce')
+                if pd.isna(date):
+                    continue
+                date_key = date.date()
+                
+                # Get sentiment - keep in -1 to 1 range
+                sentiment_score = post.get('sentiment_score')
+                
+                if sentiment_score is not None and isinstance(sentiment_score, (int, float)):
+                    # Keep raw score, clamp to [-1, 1]
+                    score = max(-1, min(1, float(sentiment_score)))
+                else:
+                    # Fallback to sentiment_label (convert to -1, 0, 1 scale)
+                    label = (post.get('sentiment_label') or post.get('sentiment') or 
+                            post.get('sentiment_class'))
+                    score = {'Bullish': 0.6, 'Bearish': -0.6, 'bullish': 0.6, 'bearish': -0.6, 
+                            'Neutral': 0, 'neutral': 0}.get(label, 0)
+                
+                if date_key not in sentiment_by_date:
+                    sentiment_by_date[date_key] = []
+                sentiment_by_date[date_key].append(score)
+            except:
+                continue
+        
+        if not sentiment_by_date:
+            return None
+        
+        # Convert to DataFrame and calculate weekly average
+        df = pd.DataFrame([
+            {'date': d, 'sentiment': np.mean(scores)}
+            for d, scores in sentiment_by_date.items()
+        ])
+        df['date'] = pd.to_datetime(df['date'])
+        df = df.sort_values('date')
+        
+        # Limit to last 6 months to match price chart
+        six_months_ago = datetime.now() - timedelta(days=180)
+        df = df[df['date'] >= six_months_ago]
+        
+        if df.empty:
+            return None
+        
+        # Calculate 7-day moving average
+        df['ma7'] = df['sentiment'].rolling(window=7, min_periods=1).mean()
+        
+        # Create chart - larger size for better visibility
+        fig, ax = plt.subplots(figsize=(12, 4), dpi=150)
+        
+        ax.plot(df['date'], df['sentiment'], alpha=0.3, color=COLORS['primary'], linewidth=1)
+        ax.plot(df['date'], df['ma7'], color=COLORS['accent'], linewidth=2, label='7-day MA')
+        # Fill from 0: green above, red below
+        ax.fill_between(df['date'], 0, df['ma7'], where=(df['ma7'] >= 0), 
+                        alpha=0.3, color=COLORS['accent'], interpolate=True)
+        ax.fill_between(df['date'], 0, df['ma7'], where=(df['ma7'] < 0), 
+                        alpha=0.3, color=COLORS['danger'], interpolate=True)
+        
+        ax.axhline(y=0, color=COLORS['grid'], linestyle='--', linewidth=1)
+        # Auto-fit Y-axis to data range with padding, but always include 0
+        y_min = min(df['sentiment'].min(), df['ma7'].min(), 0)
+        y_max = max(df['sentiment'].max(), df['ma7'].max(), 0)
+        padding = (y_max - y_min) * 0.2
+        ax.set_ylim(y_min - padding, y_max + padding)
+        ax.set_ylabel('Sentiment', fontsize=9)
+        ax.set_title(f'{ticker} Sentiment Momentum', fontsize=11, fontweight='bold')
+        ax.legend(loc='upper left', fontsize=8)
+        ax.tick_params(axis='both', labelsize=8)
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        
+        output_path = self.output_dir / "sentiment_momentum.png"
+        plt.savefig(output_path, dpi=120, bbox_inches='tight', facecolor='white')
+        plt.close()
+        return output_path
+
+    def generate_volume_activity(self, ticker: str, sentiment_data: list) -> Path:
+        """Generate a social volume activity chart showing posting frequency."""
+        if not sentiment_data:
+            return None
+        
+        # Count posts by date
+        posts_by_date = {}
+        for post in sentiment_data:
+            timestamp = (post.get('timestamp') or post.get('created_at') or 
+                        post.get('date') or post.get('time'))
+            if not timestamp:
+                continue
+            try:
+                date = pd.to_datetime(timestamp, errors='coerce')
+                if pd.isna(date):
+                    continue
+                date_key = date.date()
+                posts_by_date[date_key] = posts_by_date.get(date_key, 0) + 1
+            except:
+                continue
+        
+        if not posts_by_date:
+            return None
+        
+        df = pd.DataFrame([
+            {'date': d, 'count': c}
+            for d, c in posts_by_date.items()
+        ])
+        df['date'] = pd.to_datetime(df['date'])
+        df = df.sort_values('date')
+        
+        # Limit to last 6 months to match price chart
+        six_months_ago = datetime.now() - timedelta(days=180)
+        df = df[df['date'] >= six_months_ago]
+        
+        if df.empty:
+            return None
+        
+        # Calculate 7-day average
+        df['ma7'] = df['count'].rolling(window=7, min_periods=1).mean()
+        
+        fig, ax = plt.subplots(figsize=(12, 4), dpi=150)
+        
+        ax.bar(df['date'], df['count'], alpha=0.4, color=COLORS['primary'], width=1)
+        ax.plot(df['date'], df['ma7'], color=COLORS['danger'], linewidth=2, label='7-day Avg')
+        
+        ax.set_ylabel('Posts/Day', fontsize=9)
+        ax.set_title(f'{ticker} Social Volume', fontsize=11, fontweight='bold')
+        ax.legend(loc='upper left', fontsize=8)
+        ax.tick_params(axis='both', labelsize=8)
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        
+        output_path = self.output_dir / "volume_activity.png"
+        plt.savefig(output_path, dpi=120, bbox_inches='tight', facecolor='white')
         plt.close()
         return output_path
 
@@ -503,15 +655,15 @@ class ChartGenerator:
         """
         sentiment_by_date = {}
         
-        # Sentiment mapping for StockTwits labels
+        # Sentiment mapping for StockTwits labels (-1 to 1 scale)
         sentiment_map = {
-            'Bullish': 0.8,
-            'bullish': 0.8,
-            'Bearish': 0.2,
-            'bearish': 0.2,
-            'Neutral': 0.5,
-            'neutral': 0.5,
-            None: 0.5,
+            'Bullish': 0.6,
+            'bullish': 0.6,
+            'Bearish': -0.6,
+            'bearish': -0.6,
+            'Neutral': 0,
+            'neutral': 0,
+            None: 0,
         }
         
         for post in posts:
@@ -540,21 +692,16 @@ class ChartGenerator:
                 sentiment_score = post.get('sentiment_score')
                 
                 if sentiment_score is not None and isinstance(sentiment_score, (int, float)):
-                    # Use the actual numerical sentiment score directly
-                    # Scale from [-1, 1] or [0, 1] range to [0, 1]
-                    if sentiment_score < 0:
-                        sentiment = (sentiment_score + 1) / 2  # Convert -1..1 to 0..1
-                    else:
-                        sentiment = float(sentiment_score)
-                    sentiment = max(0.1, min(0.9, sentiment))  # Clamp to visible range
+                    # Keep raw score in -1 to 1 range
+                    sentiment = max(-1, min(1, float(sentiment_score)))
                 else:
                     # Fallback to sentiment_label string
                     raw_label = (post.get('sentiment_label') or post.get('sentiment') or 
                                 post.get('sentiment_class'))
                     if raw_label:
-                        sentiment = sentiment_map.get(raw_label, 0.5)
+                        sentiment = sentiment_map.get(raw_label, 0)
                     else:
-                        sentiment = 0.5
+                        sentiment = 0
                 
                 if date not in sentiment_by_date:
                     sentiment_by_date[date] = []
@@ -568,7 +715,7 @@ class ChartGenerator:
         
         # Calculate daily averages aligned with target dates
         result = []
-        last_known = 0.5  # Start with neutral
+        last_known = 0  # Start with neutral (0 on -1 to 1 scale)
         
         for date in target_dates:
             date_key = date.date() if hasattr(date, 'date') else date
@@ -579,7 +726,7 @@ class ChartGenerator:
             else:
                 # Use last known value with small random variation for smoother line
                 variation = np.random.uniform(-0.02, 0.02)
-                result.append(np.clip(last_known + variation, 0.2, 0.8))
+                result.append(np.clip(last_known + variation, -0.8, 0.8))
         
         return np.array(result)
 
