@@ -1,0 +1,677 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: FinGuard - CloudWatch alarms routed to PagerDuty via pd-relay (Lambda + DynamoDB + Kinesis + Firehose)
+
+Parameters:
+  Env:
+    Type: String
+    Default: prod
+
+  IndexerLambdaName:
+    Type: String
+    Default: fin-indexer
+
+  # Kinesis stream names (your previous names)
+  EventStreamName:
+    Type: String
+    Default: fin-guard-stream
+  ReferenceStreamName:
+    Type: String
+    Default: fin-guard-reference
+
+  # Firehose delivery stream names (your previous names)
+  EventFirehoseName:
+    Type: String
+    Default: fin-guard-event-firehose
+  ReferenceFirehoseName:
+    Type: String
+    Default: fin-guard-reference-firehose
+
+Resources:
+  #########################################################
+  # LAMBDA — fin-indexer (routes to finguard-ingestion)
+  #########################################################
+
+  IndexerNoInvocations:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Env}.finguard-ingestion.critical.no_data.indexer_no_invocations"
+      AlarmDescription: !Sub >
+        {"env":"${Env}","pd_service":"finguard-ingestion","severity":"critical","class":"no_data","scope":"fin-indexer",
+         "runbook":"https://runbooks.local/finguard/indexer-no-invocations","pd_notify":true}
+      Namespace: AWS/Lambda
+      MetricName: Invocations
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref IndexerLambdaName
+      Statistic: Sum
+      Period: 900
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+
+  IndexerErrors:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Env}.finguard-ingestion.error.ingestion_failure.indexer_errors"
+      AlarmDescription: !Sub >
+        {"env":"${Env}","pd_service":"finguard-ingestion","severity":"error","class":"ingestion_failure","scope":"fin-indexer",
+         "runbook":"https://runbooks.local/finguard/indexer-errors","pd_notify":true}
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref IndexerLambdaName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  IndexerThrottles:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Env}.finguard-ingestion.critical.capacity.indexer_throttles"
+      AlarmDescription: !Sub >
+        {"env":"${Env}","pd_service":"finguard-ingestion","severity":"critical","class":"capacity","scope":"fin-indexer",
+         "runbook":"https://runbooks.local/finguard/indexer-throttles","pd_notify":true}
+      Namespace: AWS/Lambda
+      MetricName: Throttles
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref IndexerLambdaName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  #########################################################
+  # DYNAMODB — throttles + system errors (routes to finguard-dataplane)
+  #########################################################
+
+  # Helper pattern: each table gets two alarms: ThrottledRequests + SystemErrors
+
+  DdbThrottleCompanyCikMap:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Env}.finguard-dataplane.critical.ddb_throttling.company_cik_map"
+      AlarmDescription: !Sub >
+        {"env":"${Env}","pd_service":"finguard-dataplane","severity":"critical","class":"ddb_throttling","scope":"company_cik_map",
+         "runbook":"https://runbooks.local/finguard/ddb-throttling","pd_notify":true}
+      Namespace: AWS/DynamoDB
+      MetricName: ThrottledRequests
+      Dimensions: [{ Name: TableName, Value: "company_cik_map" }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  DdbSystemErrorsCompanyCikMap:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Env}.finguard-dataplane.critical.ddb_system_errors.company_cik_map"
+      AlarmDescription: !Sub >
+        {"env":"${Env}","pd_service":"finguard-dataplane","severity":"critical","class":"ddb_system_errors","scope":"company_cik_map",
+         "runbook":"https://runbooks.local/finguard/ddb-system-errors","pd_notify":true}
+      Namespace: AWS/DynamoDB
+      MetricName: SystemErrors
+      Dimensions: [{ Name: TableName, Value: "company_cik_map" }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  DdbThrottleEsgBlacklist:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Env}.finguard-dataplane.error.ddb_throttling.fin-guard-esg-blacklist"
+      AlarmDescription: !Sub >
+        {"env":"${Env}","pd_service":"finguard-dataplane","severity":"error","class":"ddb_throttling","scope":"fin-guard-esg-blacklist",
+         "runbook":"https://runbooks.local/finguard/ddb-throttling","pd_notify":true}
+      Namespace: AWS/DynamoDB
+      MetricName: ThrottledRequests
+      Dimensions: [{ Name: TableName, Value: "fin-guard-esg-blacklist" }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  DdbSystemErrorsEsgBlacklist:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Env}.finguard-dataplane.error.ddb_system_errors.fin-guard-esg-blacklist"
+      AlarmDescription: !Sub >
+        {"env":"${Env}","pd_service":"finguard-dataplane","severity":"error","class":"ddb_system_errors","scope":"fin-guard-esg-blacklist",
+         "runbook":"https://runbooks.local/finguard/ddb-system-errors","pd_notify":true}
+      Namespace: AWS/DynamoDB
+      MetricName: SystemErrors
+      Dimensions: [{ Name: TableName, Value: "fin-guard-esg-blacklist" }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  DdbThrottleEsgDomain:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Env}.finguard-dataplane.error.ddb_throttling.fin-guard-esg-domain"
+      AlarmDescription: !Sub >
+        {"env":"${Env}","pd_service":"finguard-dataplane","severity":"error","class":"ddb_throttling","scope":"fin-guard-esg-domain",
+         "runbook":"https://runbooks.local/finguard/ddb-throttling","pd_notify":true}
+      Namespace: AWS/DynamoDB
+      MetricName: ThrottledRequests
+      Dimensions: [{ Name: TableName, Value: "fin-guard-esg-domain" }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  DdbSystemErrorsEsgDomain:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Env}.finguard-dataplane.error.ddb_system_errors.fin-guard-esg-domain"
+      AlarmDescription: !Sub >
+        {"env":"${Env}","pd_service":"finguard-dataplane","severity":"error","class":"ddb_system_errors","scope":"fin-guard-esg-domain",
+         "runbook":"https://runbooks.local/finguard/ddb-system-errors","pd_notify":true}
+      Namespace: AWS/DynamoDB
+      MetricName: SystemErrors
+      Dimensions: [{ Name: TableName, Value: "fin-guard-esg-domain" }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  DdbThrottleEsgSeen:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Env}.finguard-dataplane.error.ddb_throttling.fin-guard-esg-seen"
+      AlarmDescription: !Sub >
+        {"env":"${Env}","pd_service":"finguard-dataplane","severity":"error","class":"ddb_throttling","scope":"fin-guard-esg-seen",
+         "runbook":"https://runbooks.local/finguard/ddb-throttling","pd_notify":true}
+      Namespace: AWS/DynamoDB
+      MetricName: ThrottledRequests
+      Dimensions: [{ Name: TableName, Value: "fin-guard-esg-seen" }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  DdbSystemErrorsEsgSeen:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Env}.finguard-dataplane.error.ddb_system_errors.fin-guard-esg-seen"
+      AlarmDescription: !Sub >
+        {"env":"${Env}","pd_service":"finguard-dataplane","severity":"error","class":"ddb_system_errors","scope":"fin-guard-esg-seen",
+         "runbook":"https://runbooks.local/finguard/ddb-system-errors","pd_notify":true}
+      Namespace: AWS/DynamoDB
+      MetricName: SystemErrors
+      Dimensions: [{ Name: TableName, Value: "fin-guard-esg-seen" }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  DdbThrottleSecSeen:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Env}.finguard-dataplane.error.ddb_throttling.fin-guard-sec-seen"
+      AlarmDescription: !Sub >
+        {"env":"${Env}","pd_service":"finguard-dataplane","severity":"error","class":"ddb_throttling","scope":"fin-guard-sec-seen",
+         "runbook":"https://runbooks.local/finguard/ddb-throttling","pd_notify":true}
+      Namespace: AWS/DynamoDB
+      MetricName: ThrottledRequests
+      Dimensions: [{ Name: TableName, Value: "fin-guard-sec-seen" }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  DdbSystemErrorsSecSeen:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Env}.finguard-dataplane.error.ddb_system_errors.fin-guard-sec-seen"
+      AlarmDescription: !Sub >
+        {"env":"${Env}","pd_service":"finguard-dataplane","severity":"error","class":"ddb_system_errors","scope":"fin-guard-sec-seen",
+         "runbook":"https://runbooks.local/finguard/ddb-system-errors","pd_notify":true}
+      Namespace: AWS/DynamoDB
+      MetricName: SystemErrors
+      Dimensions: [{ Name: TableName, Value: "fin-guard-sec-seen" }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  DdbThrottlePartitions:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Env}.finguard-dataplane.critical.ddb_throttling.fin_guard_partitions"
+      AlarmDescription: !Sub >
+        {"env":"${Env}","pd_service":"finguard-dataplane","severity":"critical","class":"ddb_throttling","scope":"fin_guard_partitions",
+         "runbook":"https://runbooks.local/finguard/ddb-throttling","pd_notify":true}
+      Namespace: AWS/DynamoDB
+      MetricName: ThrottledRequests
+      Dimensions: [{ Name: TableName, Value: "fin_guard_partitions" }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  DdbSystemErrorsPartitions:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Env}.finguard-dataplane.critical.ddb_system_errors.fin_guard_partitions"
+      AlarmDescription: !Sub >
+        {"env":"${Env}","pd_service":"finguard-dataplane","severity":"critical","class":"ddb_system_errors","scope":"fin_guard_partitions",
+         "runbook":"https://runbooks.local/finguard/ddb-system-errors","pd_notify":true}
+      Namespace: AWS/DynamoDB
+      MetricName: SystemErrors
+      Dimensions: [{ Name: TableName, Value: "fin_guard_partitions" }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  DdbThrottleSocialLocks:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Env}.finguard-dataplane.critical.ddb_throttling.social_locks"
+      AlarmDescription: !Sub >
+        {"env":"${Env}","pd_service":"finguard-dataplane","severity":"critical","class":"ddb_throttling","scope":"social_locks",
+         "runbook":"https://runbooks.local/finguard/ddb-throttling","pd_notify":true}
+      Namespace: AWS/DynamoDB
+      MetricName: ThrottledRequests
+      Dimensions: [{ Name: TableName, Value: "social_locks" }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  DdbSystemErrorsSocialLocks:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Env}.finguard-dataplane.critical.ddb_system_errors.social_locks"
+      AlarmDescription: !Sub >
+        {"env":"${Env}","pd_service":"finguard-dataplane","severity":"critical","class":"ddb_system_errors","scope":"social_locks",
+         "runbook":"https://runbooks.local/finguard/ddb-system-errors","pd_notify":true}
+      Namespace: AWS/DynamoDB
+      MetricName: SystemErrors
+      Dimensions: [{ Name: TableName, Value: "social_locks" }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  DdbThrottleSocialState:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Env}.finguard-dataplane.error.ddb_throttling.social_state"
+      AlarmDescription: !Sub >
+        {"env":"${Env}","pd_service":"finguard-dataplane","severity":"error","class":"ddb_throttling","scope":"social_state",
+         "runbook":"https://runbooks.local/finguard/ddb-throttling","pd_notify":true}
+      Namespace: AWS/DynamoDB
+      MetricName: ThrottledRequests
+      Dimensions: [{ Name: TableName, Value: "social_state" }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  DdbSystemErrorsSocialState:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Env}.finguard-dataplane.error.ddb_system_errors.social_state"
+      AlarmDescription: !Sub >
+        {"env":"${Env}","pd_service":"finguard-dataplane","severity":"error","class":"ddb_system_errors","scope":"social_state",
+         "runbook":"https://runbooks.local/finguard/ddb-system-errors","pd_notify":true}
+      Namespace: AWS/DynamoDB
+      MetricName: SystemErrors
+      Dimensions: [{ Name: TableName, Value: "social_state" }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  DdbThrottleStocktwitsSeen:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Env}.finguard-dataplane.error.ddb_throttling.social_stocktwits_seen"
+      AlarmDescription: !Sub >
+        {"env":"${Env}","pd_service":"finguard-dataplane","severity":"error","class":"ddb_throttling","scope":"social_stocktwits_seen",
+         "runbook":"https://runbooks.local/finguard/ddb-throttling","pd_notify":true}
+      Namespace: AWS/DynamoDB
+      MetricName: ThrottledRequests
+      Dimensions: [{ Name: TableName, Value: "social_stocktwits_seen" }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  DdbSystemErrorsStocktwitsSeen:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Env}.finguard-dataplane.error.ddb_system_errors.social_stocktwits_seen"
+      AlarmDescription: !Sub >
+        {"env":"${Env}","pd_service":"finguard-dataplane","severity":"error","class":"ddb_system_errors","scope":"social_stocktwits_seen",
+         "runbook":"https://runbooks.local/finguard/ddb-system-errors","pd_notify":true}
+      Namespace: AWS/DynamoDB
+      MetricName: SystemErrors
+      Dimensions: [{ Name: TableName, Value: "social_stocktwits_seen" }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  DdbThrottleYouTubeIds:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Env}.finguard-dataplane.error.ddb_throttling.social_youtube_video_ids"
+      AlarmDescription: !Sub >
+        {"env":"${Env}","pd_service":"finguard-dataplane","severity":"error","class":"ddb_throttling","scope":"social_youtube_video_ids",
+         "runbook":"https://runbooks.local/finguard/ddb-throttling","pd_notify":true}
+      Namespace: AWS/DynamoDB
+      MetricName: ThrottledRequests
+      Dimensions: [{ Name: TableName, Value: "social_youtube_video_ids" }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  DdbSystemErrorsYouTubeIds:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Env}.finguard-dataplane.error.ddb_system_errors.social_youtube_video_ids"
+      AlarmDescription: !Sub >
+        {"env":"${Env}","pd_service":"finguard-dataplane","severity":"error","class":"ddb_system_errors","scope":"social_youtube_video_ids",
+         "runbook":"https://runbooks.local/finguard/ddb-system-errors","pd_notify":true}
+      Namespace: AWS/DynamoDB
+      MetricName: SystemErrors
+      Dimensions: [{ Name: TableName, Value: "social_youtube_video_ids" }]
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  #########################################################
+  # KINESIS — Streams (routes to finguard-streams)
+  #########################################################
+
+  # EVENT stream (fin-guard-stream)
+  KinesisEventIteratorAgeHigh:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Env}.finguard-streams.error.backlog_lag.event_iterator_age"
+      AlarmDescription: !Sub >
+        {"env":"${Env}","pd_service":"finguard-streams","severity":"error","class":"backlog_lag","scope":"fin-guard-stream",
+         "runbook":"https://runbooks.local/finguard/kinesis-iterator-age","pd_notify":true}
+      Namespace: AWS/Kinesis
+      MetricName: GetRecords.IteratorAgeMilliseconds
+      Dimensions:
+        - Name: StreamName
+          Value: !Ref EventStreamName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 300000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  KinesisEventNoData:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Env}.finguard-streams.critical.no_data.event_incoming_records_zero"
+      AlarmDescription: !Sub >
+        {"env":"${Env}","pd_service":"finguard-streams","severity":"critical","class":"no_data","scope":"fin-guard-stream",
+         "runbook":"https://runbooks.local/finguard/kinesis-no-data","pd_notify":true}
+      Namespace: AWS/Kinesis
+      MetricName: IncomingRecords
+      Dimensions:
+        - Name: StreamName
+          Value: !Ref EventStreamName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+
+  KinesisEventWriteThrottled:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Env}.finguard-streams.error.throttling.event_write_throughput_exceeded"
+      AlarmDescription: !Sub >
+        {"env":"${Env}","pd_service":"finguard-streams","severity":"error","class":"throttling","scope":"fin-guard-stream",
+         "runbook":"https://runbooks.local/finguard/kinesis-write-throttle","pd_notify":true}
+      Namespace: AWS/Kinesis
+      MetricName: WriteProvisionedThroughputExceeded
+      Dimensions:
+        - Name: StreamName
+          Value: !Ref EventStreamName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  KinesisEventReadThrottled:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Env}.finguard-streams.warning.throttling.event_read_throughput_exceeded"
+      AlarmDescription: !Sub >
+        {"env":"${Env}","pd_service":"finguard-streams","severity":"warning","class":"throttling","scope":"fin-guard-stream",
+         "runbook":"https://runbooks.local/finguard/kinesis-read-throttle","pd_notify":true}
+      Namespace: AWS/Kinesis
+      MetricName: ReadProvisionedThroughputExceeded
+      Dimensions:
+        - Name: StreamName
+          Value: !Ref EventStreamName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  KinesisEventPutRecordsSuccessLow:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Env}.finguard-streams.error.write_errors.event_putrecords_success_low"
+      AlarmDescription: !Sub >
+        {"env":"${Env}","pd_service":"finguard-streams","severity":"error","class":"write_errors","scope":"fin-guard-stream",
+         "runbook":"https://runbooks.local/finguard/kinesis-putrecords","pd_notify":true}
+      Namespace: AWS/Kinesis
+      MetricName: PutRecords.Success
+      Dimensions:
+        - Name: StreamName
+          Value: !Ref EventStreamName
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: notBreaching
+
+  KinesisEventGetRecordsSuccessLow:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Env}.finguard-streams.error.read_errors.event_getrecords_success_low"
+      AlarmDescription: !Sub >
+        {"env":"${Env}","pd_service":"finguard-streams","severity":"error","class":"read_errors","scope":"fin-guard-stream",
+         "runbook":"https://runbooks.local/finguard/kinesis-getrecords","pd_notify":true}
+      Namespace: AWS/Kinesis
+      MetricName: GetRecords.Success
+      Dimensions:
+        - Name: StreamName
+          Value: !Ref EventStreamName
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: notBreaching
+
+  # REFERENCE stream (fin-guard-reference)
+  KinesisReferenceIteratorAgeHigh:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Env}.finguard-streams.error.backlog_lag.reference_iterator_age"
+      AlarmDescription: !Sub >
+        {"env":"${Env}","pd_service":"finguard-streams","severity":"error","class":"backlog_lag","scope":"fin-guard-reference",
+         "runbook":"https://runbooks.local/finguard/kinesis-iterator-age","pd_notify":true}
+      Namespace: AWS/Kinesis
+      MetricName: GetRecords.IteratorAgeMilliseconds
+      Dimensions:
+        - Name: StreamName
+          Value: !Ref ReferenceStreamName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 300000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  KinesisReferenceNoData:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Env}.finguard-streams.critical.no_data.reference_incoming_records_zero"
+      AlarmDescription: !Sub >
+        {"env":"${Env}","pd_service":"finguard-streams","severity":"critical","class":"no_data","scope":"fin-guard-reference",
+         "runbook":"https://runbooks.local/finguard/kinesis-no-data","pd_notify":true}
+      Namespace: AWS/Kinesis
+      MetricName: IncomingRecords
+      Dimensions:
+        - Name: StreamName
+          Value: !Ref ReferenceStreamName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: 1
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+
+  #########################################################
+  # FIREHOSE — Delivery streams (routes to finguard-streams)
+  #########################################################
+
+  FirehoseEventDataFreshnessHigh:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Env}.finguard-streams.error.firehose_freshness.event_deliverytos3_datafreshness"
+      AlarmDescription: !Sub >
+        {"env":"${Env}","pd_service":"finguard-streams","severity":"error","class":"firehose_freshness","scope":"fin-guard-event-firehose",
+         "runbook":"https://runbooks.local/finguard/firehose-datafreshness","pd_notify":true}
+      Namespace: AWS/Firehose
+      MetricName: DeliveryToS3.DataFreshness
+      Dimensions:
+        - Name: DeliveryStreamName
+          Value: !Ref EventFirehoseName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 900
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  FirehoseEventThrottledRecords:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Env}.finguard-streams.warning.firehose_throttling.event_throttled_records"
+      AlarmDescription: !Sub >
+        {"env":"${Env}","pd_service":"finguard-streams","severity":"warning","class":"firehose_throttling","scope":"fin-guard-event-firehose",
+         "runbook":"https://runbooks.local/finguard/firehose-throttling","pd_notify":true}
+      Namespace: AWS/Firehose
+      MetricName: ThrottledRecords
+      Dimensions:
+        - Name: DeliveryStreamName
+          Value: !Ref EventFirehoseName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+  FirehoseReferenceDataFreshnessHigh:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Env}.finguard-streams.error.firehose_freshness.reference_deliverytos3_datafreshness"
+      AlarmDescription: !Sub >
+        {"env":"${Env}","pd_service":"finguard-streams","severity":"error","class":"firehose_freshness","scope":"fin-guard-reference-firehose",
+         "runbook":"https://runbooks.local/finguard/firehose-datafreshness","pd_notify":true}
+      Namespace: AWS/Firehose
+      MetricName: DeliveryToS3.DataFreshness
+      Dimensions:
+        - Name: DeliveryStreamName
+          Value: !Ref ReferenceFirehoseName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 900
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  FirehoseReferenceThrottledRecords:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Env}.finguard-streams.warning.firehose_throttling.reference_throttled_records"
+      AlarmDescription: !Sub >
+        {"env":"${Env}","pd_service":"finguard-streams","severity":"warning","class":"firehose_throttling","scope":"fin-guard-reference-firehose",
+         "runbook":"https://runbooks.local/finguard/firehose-throttling","pd_notify":true}
+      Namespace: AWS/Firehose
+      MetricName: ThrottledRecords
+      Dimensions:
+        - Name: DeliveryStreamName
+          Value: !Ref ReferenceFirehoseName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+
+Outputs:
+  AlarmPack:
+    Value: "FinGuard alarms deployed (Lambda + DynamoDB + Kinesis + Firehose)"

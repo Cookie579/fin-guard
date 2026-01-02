@@ -16,6 +16,7 @@ k8s/argocd/ingest-esg-go-config.yaml
 
 # --- Other Secrets ---
 config.json
+pd-keys-prod.json
 
 # --- Kube configs / Tokens ---
 *.kubeconfig
@@ -55,3 +56,5 @@ charts/
 social/
 reports/
 llm-explainer/chroma_db
+
+.aws-sam

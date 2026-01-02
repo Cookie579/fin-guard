@@ -1,0 +1,40 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: FinGuard PagerDuty Relay (CloudWatch Alarm State Change -> PagerDuty Events API v2)
+
+Parameters:
+  DefaultEnv:
+    Type: String
+    Default: prod
+  PdSecretPrefix:
+    Type: String
+    Default: pd
+
+Resources:
+  PdRelayFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "finguard-pd-relay-${DefaultEnv}"
+      Runtime: nodejs20.x
+      Handler: index.handler
+      CodeUri: pd-relay/
+      Timeout: 10
+      MemorySize: 256
+      Environment:
+        Variables:
+          DEFAULT_ENV: !Ref DefaultEnv
+          PD_SECRET_PREFIX: !Ref PdSecretPrefix
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action: secretsmanager:GetSecretValue
+              Resource: "*"
+      Events:
+        AlarmStateChange:
+          Type: EventBridgeRule
+          Properties:
+            Pattern:
+              source: ["aws.cloudwatch"]
+              detail-type: ["CloudWatch Alarm State Change"]
