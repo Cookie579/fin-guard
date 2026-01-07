@@ -1,24 +1,18 @@
+"use strict";
+
 const https = require("https");
-const {
-  SecretsManagerClient,
-  GetSecretValueCommand,
-} = require("@aws-sdk/client-secrets-manager");
+const { SecretsManagerClient, GetSecretValueCommand } = require("@aws-sdk/client-secrets-manager");
+
+// Optional OpenTelemetry API (only used if available in runtime)
+let otel = null;
+try {
+  otel = require("@opentelemetry/api");
+} catch {
+  // ok: ADOT auto-instrumentation can still produce traces without this
+}
 
 const sm = new SecretsManagerClient({});
-
-// Defaults: only process alarms starting with these prefixes (unless AlarmDescription JSON overrides)
-const ALLOWED_ALARM_PREFIXES = (process.env.ALLOWED_ALARM_PREFIXES ||
-  "prod.finguard-,stage.finguard-")
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
-
-// Default allowlist of PD services (prevents weird routing / missing-secret errors)
-const ALLOWED_PD_SERVICES = (process.env.ALLOWED_PD_SERVICES ||
-  "finguard-broker,finguard-ingestion,finguard-processing,finguard-streams,finguard-dataplane")
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
+const httpsAgent = new https.Agent({ keepAlive: true });
 
 function safeJsonParse(s) {
   if (!s || typeof s !== "string") return null;
@@ -39,8 +33,10 @@ function normalizeSeverity(s) {
 function postPD(body) {
   return new Promise((resolve, reject) => {
     const data = JSON.stringify(body);
+
     const req = https.request(
       {
+        agent: httpsAgent,
         hostname: "events.pagerduty.com",
         path: "/v2/enqueue",
         method: "POST",
@@ -71,8 +67,7 @@ async function getSecretString(secretId) {
 }
 
 function classifyFromAlarmName(alarmName, envDefault) {
-  // Convention (recommended):
-  // "prod.finguard-broker.critical.api_availability.5xx_rate_high"
+  // Optional convention: "prod.finguard-broker.critical.api_availability.5xx_rate_high"
   const p = (alarmName || "").split(".");
   return {
     env: p[0] || envDefault || "prod",
@@ -83,117 +78,136 @@ function classifyFromAlarmName(alarmName, envDefault) {
   };
 }
 
-exports.handler = async (event) => {
-  const detail = event?.detail || {};
-  const alarmName = detail.alarmName || "unknown_alarm";
-  const state = detail?.state?.value || "UNKNOWN"; // ALARM | OK | INSUFFICIENT_DATA
-  const reason = detail?.state?.reason || "";
-  const region = event.region || process.env.AWS_REGION;
+function withSpan(spanName, fn) {
+  if (!otel) return fn(null);
 
-  // --- HARDENING #1: Only process FinGuard alarms ---
-  const metaFromDesc = safeJsonParse(detail.alarmDescription);
-  const isAllowedByPrefix = ALLOWED_ALARM_PREFIXES.some((pfx) =>
-    alarmName.startsWith(pfx)
-  );
+  const tracer = otel.trace.getTracer("finguard-pd-relay-prod");
+  return tracer.startActiveSpan(spanName, async (span) => {
+    try {
+      return await fn(span);
+    } catch (err) {
+      try {
+        span.recordException(err);
+        span.setStatus({ code: otel.SpanStatusCode.ERROR, message: String(err?.message || err) });
+      } catch { }
+      throw err;
+    } finally {
+      try {
+        span.end();
+      } catch { }
+    }
+  });
+}
 
-  // If no JSON metadata AND alarm doesn't match prefix, ignore entirely
-  if (!metaFromDesc && !isAllowedByPrefix) {
-    console.log("Ignoring non-FinGuard alarm (no metadata + not allowed prefix)", {
+exports.handler = async (event, context) => {
+  return withSpan("pd_relay.handle_event", async (span) => {
+    const xrayTraceId = process.env._X_AMZN_TRACE_ID || "";
+    const awsRequestId = context?.awsRequestId || "";
+    const region = event?.region || process.env.AWS_REGION || "unknown";
+
+    const detail = event?.detail || {};
+    const alarmName = detail.alarmName || "unknown_alarm";
+    const state = detail?.state?.value || "UNKNOWN"; // ALARM | OK | INSUFFICIENT_DATA
+    const reason = detail?.state?.reason || "";
+
+    // Recommended: put JSON in AlarmDescription for exact routing/classification
+    const meta =
+      safeJsonParse(detail.alarmDescription) ||
+      classifyFromAlarmName(alarmName, process.env.DEFAULT_ENV);
+
+    const env = meta.env || process.env.DEFAULT_ENV || "prod";
+    const pdService = meta.pd_service || "finguard-broker";
+    const severity = normalizeSeverity(meta.severity);
+    const cls = meta.class || "alarm";
+    const scope = meta.scope || "global";
+    const runbook = meta.runbook || "";
+    const pdNotify = meta.pd_notify !== false; // default true unless explicitly false
+
+    const dedupKey =
+      meta.dedup_key ||
+      `${env}:${pdService}:${cls}:${scope}:${alarmName}`;
+
+    // Basic span attributes (only if manual OTel API available)
+    if (span) {
+      span.setAttribute("finguard.env", env);
+      span.setAttribute("finguard.pd_service", pdService);
+      span.setAttribute("finguard.class", cls);
+      span.setAttribute("finguard.scope", scope);
+      span.setAttribute("finguard.alarm_name", alarmName);
+      span.setAttribute("finguard.state", state);
+      span.setAttribute("finguard.pd_notify", pdNotify);
+      span.setAttribute("aws.region", region);
+    }
+
+    console.log("pd-relay: received", {
       alarmName,
-      allowedPrefixes: ALLOWED_ALARM_PREFIXES,
+      state,
+      env,
+      pdService,
+      cls,
+      scope,
+      pdNotify,
+      awsRequestId,
+      xrayTraceId,
     });
-    return { ignored: true };
-  }
 
-  // Recommended: put JSON in AlarmDescription for exact routing/classification
-  const meta =
-    metaFromDesc || classifyFromAlarmName(alarmName, process.env.DEFAULT_ENV);
+    if (state === "INSUFFICIENT_DATA") {
+      console.log("Ignoring INSUFFICIENT_DATA", { alarmName });
+      return { ignored: true };
+    }
 
-  // --- HARDENING #2: Allow alarms that do NOT page (pd_notify=false) ---
-  // This lets you create tons of alarms (Tier 1/2) without paging.
-  if (meta && meta.pd_notify === false) {
-    console.log("pd_notify=false; not sending to PagerDuty", { alarmName });
-    return { ignored: true };
-  }
+    const eventAction = state === "OK" ? "resolve" : "trigger";
 
-  // Ignore insufficient data (simple default; you can change later)
-  if (state === "INSUFFICIENT_DATA") {
-    console.log("Ignoring INSUFFICIENT_DATA", { alarmName });
-    return { ignored: true };
-  }
+    // Allow safe testing without paging
+    if (!pdNotify) {
+      console.log("pd_notify is false; skipping PagerDuty enqueue", { alarmName, eventAction, dedupKey });
+      return { skipped: true, reason: "pd_notify_false", alarmName, eventAction, dedupKey };
+    }
 
-  // Only act on ALARM and OK (ignore UNKNOWN or other unexpected values)
-  if (state !== "ALARM" && state !== "OK") {
-    console.log("Ignoring unsupported alarm state", { alarmName, state });
-    return { ignored: true };
-  }
+    const secretPrefix = process.env.PD_SECRET_PREFIX || "pd";
+    const routingKeySecretId = `${secretPrefix}/${env}/${pdService}`;
 
-  const env = meta.env || process.env.DEFAULT_ENV || "prod";
-  const pdService = meta.pd_service || "finguard-broker";
+    const routingKey = await getSecretString(routingKeySecretId);
 
-  // Guard against typos / unknown services (prevents missing secret lookups)
-  if (!ALLOWED_PD_SERVICES.includes(pdService)) {
-    console.log("Ignoring alarm with unknown pd_service", {
-      alarmName,
-      pd_service: pdService,
-      allowed: ALLOWED_PD_SERVICES,
-    });
-    return { ignored: true };
-  }
-
-  const severity = normalizeSeverity(meta.severity);
-  const cls = meta.class || "alarm";
-  const scope = meta.scope || "global";
-  const runbook = meta.runbook || "";
-
-  // Deterministic dedup key (trigger/resolve MUST match)
-  const dedupKey =
-    meta.dedup_key || `${env}:${pdService}:${cls}:${scope}:${alarmName}`;
-
-  const eventAction = state === "OK" ? "resolve" : "trigger";
-
-  const secretPrefix = process.env.PD_SECRET_PREFIX || "pd";
-  const routingKeySecretId = `${secretPrefix}/${env}/${pdService}`;
-  const routingKey = await getSecretString(routingKeySecretId);
-
-  const payload = {
-    routing_key: routingKey,
-    event_action: eventAction,
-    dedup_key: dedupKey,
-    payload: {
-      summary: `[${env}] ${pdService} ${state}: ${alarmName}`,
-      source: "aws.cloudwatch",
-      severity: eventAction === "resolve" ? "info" : severity,
-      timestamp: new Date().toISOString(),
-      custom_details: {
-        env,
-        pd_service: pdService,
-        class: cls,
-        scope,
-        alarmName,
-        state,
-        reason,
-        region,
-        runbook,
+    const payload = {
+      routing_key: routingKey,
+      event_action: eventAction,
+      dedup_key: dedupKey,
+      payload: {
+        summary: `[${env}] ${pdService} ${state}: ${alarmName}`,
+        source: "aws.cloudwatch",
+        severity: eventAction === "resolve" ? "info" : severity,
+        timestamp: new Date().toISOString(),
+        custom_details: {
+          env,
+          pd_service: pdService,
+          class: cls,
+          scope,
+          alarmName,
+          state,
+          reason,
+          region,
+          runbook,
+          aws_request_id: awsRequestId,
+          xray_trace_id: xrayTraceId,
+        },
       },
-    },
-    links: [
-      runbook ? { href: runbook, text: "Runbook" } : null,
-      {
-        href: `https://${region}.console.aws.amazon.com/cloudwatch/home?region=${region}#alarmsV2:alarm/${encodeURIComponent(
-          alarmName
-        )}`,
-        text: "CloudWatch Alarm",
-      },
-    ].filter(Boolean),
-  };
+      links: [
+        runbook ? { href: runbook, text: "Runbook" } : null,
+        {
+          href: `https://${region}.console.aws.amazon.com/cloudwatch/home?region=${region}#alarmsV2:alarm/${encodeURIComponent(alarmName)}`,
+          text: "CloudWatch Alarm",
+        },
+      ].filter(Boolean),
+    };
 
-  const resp = await postPD(payload);
-  console.log("PagerDuty response", resp.statusCode, resp.body);
+    const resp = await postPD(payload);
+    console.log("PagerDuty response", { statusCode: resp.statusCode, body: resp.body });
 
-  if (resp.statusCode < 200 || resp.statusCode >= 300) {
-    throw new Error(`PagerDuty enqueue failed: ${resp.statusCode} ${resp.body}`);
-  }
+    if (resp.statusCode < 200 || resp.statusCode >= 300) {
+      throw new Error(`PagerDuty enqueue failed: ${resp.statusCode} ${resp.body}`);
+    }
 
-  return { ok: true };
+    return { ok: true, eventAction, dedupKey };
+  });
 };

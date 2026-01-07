@@ -1,0 +1,3 @@
+"""
+FinGuard CLI package
+"""

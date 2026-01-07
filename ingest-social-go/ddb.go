@@ -43,14 +43,20 @@ func NewDynamoStore(ctx context.Context) (*DynamoStore, error) {
 // succeed if the row does not already exist or if the existing lock has
 // expired. On success the caller becomes the lock owner until it either
 // releases the lock or the TTL expires. The ownerID should uniquely
-// identify the current process/job.
-func (s *DynamoStore) AcquireLock(ctx context.Context, source, ticker, ownerID, jobID string) error {
+// identify the current process/job. Returns a lockToken that MUST be used
+// for all subsequent HeartbeatLock and ReleaseLock calls to prevent
+// split-brain edge cases.
+func (s *DynamoStore) AcquireLock(ctx context.Context, source, ticker, ownerID, jobID string) (string, error) {
 	pk := fmt.Sprintf("%s#%s", strings.ToLower(source), strings.ToUpper(ticker))
 	now := time.Now().UTC().Unix()
 	expires := now + LockTTLSeconds
+	// Generate a unique lock token to prevent split-brain edge cases.
+	// This token must be provided on heartbeat/release to prove ownership.
+	lockToken := fmt.Sprintf("%d-%s", now, ownerID)
 	item := map[string]types.AttributeValue{
 		"pk":         &types.AttributeValueMemberS{Value: pk},
 		"owner_id":   &types.AttributeValueMemberS{Value: ownerID},
+		"lock_token": &types.AttributeValueMemberS{Value: lockToken},
 		"job_id":     &types.AttributeValueMemberS{Value: jobID},
 		"expires_at": &types.AttributeValueMemberN{Value: strconv.FormatInt(expires, 10)},
 	}
@@ -70,17 +76,18 @@ func (s *DynamoStore) AcquireLock(ctx context.Context, source, ticker, ownerID, 
 		if errors.As(err, &ccfe) {
 			// Another worker holds the lock. Return the sentinel so callers
 			// can exit gracefully. Wrap the sentinel to preserve context.
-			return fmt.Errorf("lock already held for %s: %w", pk, ErrLockNotAcquired)
+			return "", fmt.Errorf("lock already held for %s: %w", pk, ErrLockNotAcquired)
 		}
-		return err
+		return "", err
 	}
-	return nil
+	return lockToken, nil
 }
 
 // HeartbeatLock extends the lock TTL for the specified owner. If the
 // condition fails the caller no longer owns the lock and should abort. The
-// new expiration time is computed from the current time.
-func (s *DynamoStore) HeartbeatLock(ctx context.Context, source, ticker, ownerID string) error {
+// new expiration time is computed from the current time. The lockToken
+// must match the token returned from AcquireLock to prevent split-brain.
+func (s *DynamoStore) HeartbeatLock(ctx context.Context, source, ticker, ownerID, lockToken string) error {
 	pk := fmt.Sprintf("%s#%s", strings.ToLower(source), strings.ToUpper(ticker))
 	newExp := time.Now().UTC().Unix() + LockTTLSeconds
 	input := &dynamodb.UpdateItemInput{
@@ -89,43 +96,45 @@ func (s *DynamoStore) HeartbeatLock(ctx context.Context, source, ticker, ownerID
 			"pk": &types.AttributeValueMemberS{Value: pk},
 		},
 		UpdateExpression:    aws.String("SET expires_at = :newExp"),
-		ConditionExpression: aws.String("owner_id = :me"),
+		ConditionExpression: aws.String("owner_id = :me AND lock_token = :token"),
 		ExpressionAttributeValues: map[string]types.AttributeValue{
 			":newExp": &types.AttributeValueMemberN{Value: strconv.FormatInt(newExp, 10)},
 			":me":     &types.AttributeValueMemberS{Value: ownerID},
+			":token":  &types.AttributeValueMemberS{Value: lockToken},
 		},
 	}
 	_, err := s.client.UpdateItem(ctx, input)
 	if err != nil {
 		var ccfe *types.ConditionalCheckFailedException
 		if errors.As(err, &ccfe) {
-			return fmt.Errorf("heartbeat failed, lock not owned: %w", err)
+			return fmt.Errorf("heartbeat failed, lock not owned or token mismatch: %w", err)
 		}
 		return err
 	}
 	return nil
 }
 
-// ReleaseLock deletes the lock row if the caller is still the owner. If the
-// condition fails the lock is assumed to have been lost and nothing is
-// deleted.
-func (s *DynamoStore) ReleaseLock(ctx context.Context, source, ticker, ownerID string) error {
+// ReleaseLock deletes the lock row if the caller is still the owner and
+// the lock token matches. If the condition fails the lock is assumed to
+// have been lost and nothing is deleted.
+func (s *DynamoStore) ReleaseLock(ctx context.Context, source, ticker, ownerID, lockToken string) error {
 	pk := fmt.Sprintf("%s#%s", strings.ToLower(source), strings.ToUpper(ticker))
 	input := &dynamodb.DeleteItemInput{
 		TableName: aws.String(DdbLocksTable),
 		Key: map[string]types.AttributeValue{
 			"pk": &types.AttributeValueMemberS{Value: pk},
 		},
-		ConditionExpression: aws.String("owner_id = :me"),
+		ConditionExpression: aws.String("owner_id = :me AND lock_token = :token"),
 		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":me": &types.AttributeValueMemberS{Value: ownerID},
+			":me":    &types.AttributeValueMemberS{Value: ownerID},
+			":token": &types.AttributeValueMemberS{Value: lockToken},
 		},
 	}
 	_, err := s.client.DeleteItem(ctx, input)
 	if err != nil {
 		var ccfe *types.ConditionalCheckFailedException
 		if errors.As(err, &ccfe) {
-			return fmt.Errorf("release failed, lock not owned: %w", err)
+			return fmt.Errorf("release failed, lock not owned or token mismatch: %w", err)
 		}
 		return err
 	}

@@ -1,0 +1,188 @@
+# ============================================================
+# Kyverno ClusterPolicy: Require secrets/configmaps for FinGuard Jobs
+# ============================================================
+# This policy enforces that Jobs in the finguard namespace:
+# 1. Have required labels (finguard.io/jobType)
+# 2. Reference secrets/configmaps that actually exist
+#
+# This provides "true admission control" that prevents bypassing
+# the orchestrator to create Jobs directly via kubectl.
+#
+# Deploy: kubectl apply -f kyverno-job-policy.yaml
+# ============================================================
+
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-finguard-job-dependencies
+  annotations:
+    policies.kyverno.io/title: Require FinGuard Job Dependencies
+    policies.kyverno.io/category: FinGuard
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/subject: Job
+    policies.kyverno.io/description: >-
+      Ensures that Jobs in the finguard namespace have required labels
+      and reference existing secrets/configmaps. Prevents CrashLoopBackoff
+      from missing dependencies.
+spec:
+  validationFailureAction: Enforce
+  background: false
+  rules:
+    # ============================================================
+    # Rule 1: Require jobType label
+    # ============================================================
+    - name: require-job-type-label
+      match:
+        any:
+          - resources:
+              kinds:
+                - Job
+              namespaces:
+                - finguard
+      validate:
+        message: "Jobs in finguard namespace must have label 'finguard.io/jobType' set to 'sec', 'esg', or 'social'"
+        pattern:
+          metadata:
+            labels:
+              finguard.io/jobType: "sec|esg|social"
+
+    # ============================================================
+    # Rule 2: Validate SEC job has required secret
+    # ============================================================
+    - name: sec-job-requires-secret
+      match:
+        any:
+          - resources:
+              kinds:
+                - Job
+              namespaces:
+                - finguard
+              selector:
+                matchLabels:
+                  finguard.io/jobType: sec
+      context:
+        - name: secretExists
+          apiCall:
+            urlPath: "/api/v1/namespaces/finguard/secrets/sec-edgar-api-key"
+            jmesPath: "metadata.name || ''"
+      validate:
+        message: "SEC jobs require secret 'sec-edgar-api-key' to exist in namespace finguard"
+        deny:
+          conditions:
+            any:
+              - key: "{{ secretExists }}"
+                operator: Equals
+                value: ""
+
+    # ============================================================
+    # Rule 3: Validate ESG job has required secret
+    # ============================================================
+    - name: esg-job-requires-secret
+      match:
+        any:
+          - resources:
+              kinds:
+                - Job
+              namespaces:
+                - finguard
+              selector:
+                matchLabels:
+                  finguard.io/jobType: esg
+      context:
+        - name: secretExists
+          apiCall:
+            urlPath: "/api/v1/namespaces/finguard/secrets/serper-api-key"
+            jmesPath: "metadata.name || ''"
+      validate:
+        message: "ESG jobs require secret 'serper-api-key' to exist in namespace finguard"
+        deny:
+          conditions:
+            any:
+              - key: "{{ secretExists }}"
+                operator: Equals
+                value: ""
+
+    # ============================================================
+    # Rule 4: Validate Social job has required secret
+    # ============================================================
+    - name: social-job-requires-secret
+      match:
+        any:
+          - resources:
+              kinds:
+                - Job
+              namespaces:
+                - finguard
+              selector:
+                matchLabels:
+                  finguard.io/jobType: social
+      context:
+        - name: secretExists
+          apiCall:
+            urlPath: "/api/v1/namespaces/finguard/secrets/stocktwits-credentials"
+            jmesPath: "metadata.name || ''"
+      validate:
+        message: "Social jobs require secret 'stocktwits-credentials' to exist in namespace finguard"
+        deny:
+          conditions:
+            any:
+              - key: "{{ secretExists }}"
+                operator: Equals
+                value: ""
+
+    # ============================================================
+    # Rule 5: All jobs require common configmap
+    # ============================================================
+    - name: all-jobs-require-common-config
+      match:
+        any:
+          - resources:
+              kinds:
+                - Job
+              namespaces:
+                - finguard
+      context:
+        - name: configmapExists
+          apiCall:
+            urlPath: "/api/v1/namespaces/finguard/configmaps/finguard-common"
+            jmesPath: "metadata.name || ''"
+      validate:
+        message: "All finguard jobs require configmap 'finguard-common' to exist"
+        deny:
+          conditions:
+            any:
+              - key: "{{ configmapExists }}"
+                operator: Equals
+                value: ""
+
+---
+# ============================================================
+# Policy Reporter: Track policy violations
+# ============================================================
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: finguard-job-audit
+  annotations:
+    policies.kyverno.io/title: Audit FinGuard Job Creation
+    policies.kyverno.io/category: FinGuard
+    policies.kyverno.io/severity: low
+    policies.kyverno.io/subject: Job
+spec:
+  validationFailureAction: Audit # Just log, don't block
+  background: true
+  rules:
+    - name: audit-job-creation
+      match:
+        any:
+          - resources:
+              kinds:
+                - Job
+              namespaces:
+                - finguard
+      validate:
+        message: "Job created in finguard namespace"
+        pattern:
+          metadata:
+            labels:
+              finguard.io/jobType: "*"

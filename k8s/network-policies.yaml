@@ -1,0 +1,267 @@
+# NetworkPolicies for FinGuard Namespace Isolation
+# Restricts cross-environment traffic between dev/staging/prod namespaces
+
+---
+# ============================================================
+# Production Namespace Policy
+# ============================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: finguard-namespace-isolation
+  namespace: finguard
+  labels:
+    app.kubernetes.io/name: finguard
+    app.kubernetes.io/component: network-policy
+spec:
+  podSelector: {} # Applies to all pods in namespace
+  policyTypes:
+    - Ingress
+    - Egress
+
+  ingress:
+    # Allow traffic from within the same namespace
+    - from:
+        - podSelector: {}
+
+    # Allow traffic from monitoring namespace (Prometheus scraping)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9090 # Prometheus metrics
+        - protocol: TCP
+          port: 8080 # Application metrics
+
+    # Allow traffic from ingress controller
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 50051 # gRPC
+
+  egress:
+    # Allow traffic within the same namespace
+    - to:
+        - podSelector: {}
+
+    # Allow DNS resolution
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+    # Allow AWS services (VPC endpoints or NAT)
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443 # HTTPS for AWS APIs
+
+---
+# ============================================================
+# Staging Namespace Policy
+# ============================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: finguard-namespace-isolation
+  namespace: finguard-staging
+  labels:
+    app.kubernetes.io/name: finguard
+    app.kubernetes.io/component: network-policy
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+
+  ingress:
+    # Allow traffic from within the same namespace only
+    - from:
+        - podSelector: {}
+
+    # Allow monitoring
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9090
+        - protocol: TCP
+          port: 8080
+
+  egress:
+    # Allow traffic within the same namespace
+    - to:
+        - podSelector: {}
+
+    # Allow DNS
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+    # Allow AWS services
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+
+---
+# ============================================================
+# Dev Namespace Policy
+# ============================================================
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: finguard-namespace-isolation
+  namespace: finguard-dev
+  labels:
+    app.kubernetes.io/name: finguard
+    app.kubernetes.io/component: network-policy
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+
+  ingress:
+    # Allow traffic from within the same namespace only
+    - from:
+        - podSelector: {}
+
+    # Allow monitoring
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9090
+        - protocol: TCP
+          port: 8080
+
+  egress:
+    # Allow traffic within the same namespace
+    - to:
+        - podSelector: {}
+
+    # Allow DNS
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+    # Allow AWS services
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443
+
+---
+# ============================================================
+# Deny Cross-Environment Traffic (Explicit Deny)
+# ============================================================
+# These policies explicitly deny traffic between environments
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-cross-environment-ingress
+  namespace: finguard
+  labels:
+    app.kubernetes.io/name: finguard
+    app.kubernetes.io/component: network-policy
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    # Deny from staging
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: name
+                operator: NotIn
+                values:
+                  - finguard-staging
+                  - finguard-dev
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-cross-environment-ingress
+  namespace: finguard-staging
+  labels:
+    app.kubernetes.io/name: finguard
+    app.kubernetes.io/component: network-policy
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    # Deny from prod and dev
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: name
+                operator: NotIn
+                values:
+                  - finguard
+                  - finguard-dev
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-cross-environment-ingress
+  namespace: finguard-dev
+  labels:
+    app.kubernetes.io/name: finguard
+    app.kubernetes.io/component: network-policy
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  ingress:
+    # Deny from prod and staging
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: name
+                operator: NotIn
+                values:
+                  - finguard
+                  - finguard-staging

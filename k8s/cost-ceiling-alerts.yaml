@@ -1,0 +1,260 @@
+# ============================================================
+# Cost Ceiling Alerts - Prometheus Rules for FinGuard
+# ============================================================
+# These alerts fire when we're hitting cost/scaling ceilings.
+#
+# IMPORTANT: Adjust the namespace and labels to match your
+# Prometheus Operator installation (release label, etc.)
+#
+# Deploy to Prometheus via:
+#   kubectl apply -f cost-ceiling-alerts.yaml
+# ============================================================
+
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: finguard-cost-ceiling-alerts
+  namespace: monitoring # <- Change if your Prometheus is elsewhere
+  labels:
+    app: prometheus
+    role: alert-rules
+    prometheus: kube-prometheus # <- Match your Prometheus Operator's ruleSelector
+    release: prometheus # <- Common label for kube-prometheus-stack
+spec:
+  groups:
+    # ============================================================
+    # Group: Namespace Resource Quota Alerts
+    # ============================================================
+    # Uses kube-state-metrics: kube_resourcequota with type="hard"|"used"
+    - name: finguard.resourcequota
+      rules:
+        # Alert when pod quota is >80% used
+        - alert: PodQuotaNearLimit
+          expr: |
+            (
+              kube_resourcequota{namespace="finguard", resource="pods", type="used"}
+              /
+              kube_resourcequota{namespace="finguard", resource="pods", type="hard"}
+            ) > 0.8
+          for: 5m
+          labels:
+            severity: warning
+            team: finguard
+          annotations:
+            summary: "Pod quota >80% in finguard namespace"
+            description: "Pod count in finguard is at {{ $value | humanizePercentage }} of quota ({{ $labels.resource }})."
+            runbook: "https://runbooks.local/finguard/resourcequota-near-limit"
+
+        # Alert when CPU requests quota is >80% used
+        - alert: CPURequestQuotaNearLimit
+          expr: |
+            (
+              kube_resourcequota{namespace="finguard", resource="requests.cpu", type="used"}
+              /
+              kube_resourcequota{namespace="finguard", resource="requests.cpu", type="hard"}
+            ) > 0.8
+          for: 5m
+          labels:
+            severity: warning
+            team: finguard
+          annotations:
+            summary: "CPU request quota >80% in finguard"
+            description: "CPU requests at {{ $value | humanizePercentage }} of quota."
+
+        # Alert when memory requests quota is >80% used
+        - alert: MemoryRequestQuotaNearLimit
+          expr: |
+            (
+              kube_resourcequota{namespace="finguard", resource="requests.memory", type="used"}
+              /
+              kube_resourcequota{namespace="finguard", resource="requests.memory", type="hard"}
+            ) > 0.8
+          for: 5m
+          labels:
+            severity: warning
+            team: finguard
+          annotations:
+            summary: "Memory request quota >80% in finguard"
+            description: "Memory requests at {{ $value | humanizePercentage }} of quota."
+
+        # Alert when quota is 100% used (pods will be rejected)
+        # Note: This detects "at limit", not "rejection happened"
+        # For actual rejection events, use kube-event-exporter
+        - alert: ResourceQuotaAtLimit
+          expr: |
+            kube_resourcequota{namespace="finguard", type="used"}
+            >=
+            kube_resourcequota{namespace="finguard", type="hard"}
+          for: 2m
+          labels:
+            severity: warning
+            team: finguard
+            pd_service: finguard-dataplane
+          annotations:
+            summary: "ResourceQuota at 100% for {{ $labels.resource }}"
+            description: "Quota for {{ $labels.resource }} in finguard is at limit. New pods requesting this resource will be rejected."
+            runbook: "https://runbooks.local/finguard/resourcequota-at-limit"
+
+    # ============================================================
+    # Group: HPA Scaling Alerts
+    # ============================================================
+    # Uses kube-state-metrics: kube_horizontalpodautoscaler_*
+    - name: finguard.hpa
+      rules:
+        # Alert when HPA is at maxReplicas for extended period
+        - alert: HPAAtMaxReplicas
+          expr: |
+            (
+              kube_horizontalpodautoscaler_status_current_replicas{namespace="finguard"}
+              ==
+              kube_horizontalpodautoscaler_spec_max_replicas{namespace="finguard"}
+            )
+            and
+            kube_horizontalpodautoscaler_spec_max_replicas{namespace="finguard"} > 1
+          for: 10m
+          labels:
+            severity: warning
+            team: finguard
+            pd_service: finguard-processing
+          annotations:
+            summary: "HPA {{ $labels.horizontalpodautoscaler }} at maxReplicas"
+            description: "HPA {{ $labels.horizontalpodautoscaler }} has been at max replicas for >10 minutes. May need capacity increase."
+            runbook: "https://runbooks.local/finguard/hpa-at-max"
+
+        # Alert when HPA desired > current (can't scale up)
+        - alert: HPAScaleUpBlocked
+          expr: |
+            (
+              kube_horizontalpodautoscaler_status_desired_replicas{namespace="finguard"}
+              >
+              kube_horizontalpodautoscaler_status_current_replicas{namespace="finguard"}
+            )
+          for: 10m
+          labels:
+            severity: warning
+            team: finguard
+          annotations:
+            summary: "HPA {{ $labels.horizontalpodautoscaler }} cannot scale up"
+            description: "HPA wants {{ $value }} more replicas but can't provision them. Check pending pods or node capacity."
+
+    # ============================================================
+    # Group: Pod Pending Alerts
+    # ============================================================
+    # Uses kube-state-metrics: kube_pod_status_phase
+    - name: finguard.pods
+      rules:
+        # Alert when pods are pending (can't be scheduled)
+        - alert: PodsStuckPending
+          expr: |
+            sum by (namespace) (kube_pod_status_phase{namespace="finguard", phase="Pending"}) > 0
+          for: 5m
+          labels:
+            severity: warning
+            team: finguard
+            pd_service: finguard-processing
+          annotations:
+            summary: "{{ $value }} pods stuck Pending in finguard"
+            description: "Pods have been Pending for >5 minutes. Check node capacity, resource constraints, or scheduling issues."
+            runbook: "https://runbooks.local/finguard/pods-pending"
+
+        # Alert when pending pods are increasing
+        - alert: PendingPodsIncreasing
+          expr: |
+            sum(kube_pod_status_phase{namespace="finguard", phase="Pending"})
+            -
+            sum(kube_pod_status_phase{namespace="finguard", phase="Pending"} offset 10m)
+            > 2
+          for: 5m
+          labels:
+            severity: warning
+            team: finguard
+          annotations:
+            summary: "Pending pods increasing in finguard"
+            description: "Pending pod count increased by >2 in the last 10 minutes."
+
+    # ============================================================
+    # Group: Cluster Autoscaler Alerts
+    # ============================================================
+    # Uses Cluster Autoscaler metrics (must be scraped from CA pod)
+    # See: https://github.com/kubernetes/autoscaler/blob/master/cluster-autoscaler/proposals/metrics.md
+    - name: finguard.autoscaler
+      rules:
+        # Alert when Cluster Autoscaler can't scale up
+        - alert: ClusterAutoscalerUnableToScaleUp
+          expr: |
+            cluster_autoscaler_unschedulable_pods_count > 0
+          for: 5m
+          labels:
+            severity: critical
+            team: finguard
+            pd_service: finguard-dataplane
+          annotations:
+            summary: "Cluster Autoscaler: {{ $value }} unschedulable pods"
+            description: "Pods are unschedulable and Cluster Autoscaler cannot provision more nodes. May have hit ASG max_size or other limits."
+            runbook: "https://runbooks.local/finguard/autoscaler-blocked"
+
+        # Alert when Cluster Autoscaler has scale-up failures
+        - alert: ClusterAutoscalerScaleUpFailed
+          expr: |
+            increase(cluster_autoscaler_failed_scale_ups_total[10m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+            team: finguard
+          annotations:
+            summary: "Cluster Autoscaler scale-up failures"
+            description: "Cluster Autoscaler failed to scale up {{ $value }} times in the last 10 minutes."
+
+        # Alert when node count is at a static threshold (fallback if CA metrics unavailable)
+        # Threshold = sum of ASG max_size values: ingestion (10) + processing (5) = 15
+        - alert: NodeCountAtStaticCeiling
+          expr: |
+            count(kube_node_info) >= 15
+          for: 5m
+          labels:
+            severity: info
+            team: finguard
+          annotations:
+            summary: "Node count at or above 15 (cluster ceiling)"
+            description: "Cluster has {{ $value }} nodes. This matches the combined ASG max_size (ingestion:10 + processing:5 = 15), indicating you're at the node ceiling."
+
+    # ============================================================
+    # Group: Karpenter Alerts (if using Karpenter instead of CA)
+    # ============================================================
+    # Uses Karpenter metrics (must be scraped from Karpenter controller)
+    - name: finguard.karpenter
+      rules:
+        # Alert when Karpenter NodePool is >90% of limits
+        - alert: KarpenterNodePoolNearLimit
+          expr: |
+            (
+              karpenter_nodepool_usage{resource="cpu"}
+              /
+              karpenter_nodepool_limit{resource="cpu"}
+            ) > 0.9
+            or
+            (
+              karpenter_nodepool_usage{resource="memory"}
+              /
+              karpenter_nodepool_limit{resource="memory"}
+            ) > 0.9
+          for: 5m
+          labels:
+            severity: warning
+            team: finguard
+            pd_service: finguard-dataplane
+          annotations:
+            summary: "Karpenter NodePool at >90% of limit"
+            description: "NodePool {{ $labels.nodepool }} is at >90% of its {{ $labels.resource }} limit. New nodes may not be provisioned."
+
+        # Alert when Karpenter can't provision
+        - alert: KarpenterProvisioningFailed
+          expr: |
+            increase(karpenter_provisioner_scheduling_duration_seconds_count{result="error"}[10m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+            team: finguard
+          annotations:
+            summary: "Karpenter provisioning failures"
+            description: "Karpenter failed to provision nodes {{ $value }} times in the last 10 minutes."
