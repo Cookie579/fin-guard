@@ -16,6 +16,12 @@ This directory contains operational runbooks for FinGuard incident response. Eac
 | [RB-08](RB-08-hpa-at-max.md) | HPA at Max / Scaling Blocked | Warning | `HPAAtMaxReplicas`, `HPAScaleUpBlocked` |
 | [RB-09](RB-09-resourcequota-limit.md) | ResourceQuota Near/At Limit | Warning→Critical | `PodQuotaNearLimit`, `ResourceQuotaAtLimit` |
 | [RB-10](RB-10-node-ceiling.md) | Node Ceiling Reached | Warning→Critical | `ClusterAutoscalerUnableToScaleUp`, `NodeCountAtStaticCeiling` |
+| [RB-11](RB-11-waf-rate-limit.md) | WAF Rate Limit Triggered | Warning | `finguard-orchestrator-rate-limit` |
+| [RB-12](RB-12-preflight-denies-job.md) | Preflight Denies Job Creation | Warning | `PREFLIGHT_CHECK_FAILED` |
+| [RB-13](RB-13-kyverno-admission-deny.md) | Kyverno Admission Deny | Warning | Kyverno PolicyReport |
+| [RB-14](RB-14-freshness-guard-deny.md) | Freshness Guard Deny | Warning | `422 STALE_DATA` |
+| [RB-15](RB-15-budget-exceeded.md) | Budget Exceeded | Warning | `422 BUDGET_EXCEEDED` |
+| [RB-16](RB-16-cli-issues.md) | CLI Orchestrator Issues | Info | N/A |
 
 ## Runbook Template Structure
 
